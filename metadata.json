@@ -1,0 +1,8 @@
+{
+  "name": "Framely — Zero-Knowledge Telegram Photo Vault",
+  "description": "Private, client-only Google Photos desktop clone backed by your own Telegram Channel over direct MTProto WebSockets with AES-256-GCM encryption.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
