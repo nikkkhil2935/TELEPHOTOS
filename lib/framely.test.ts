@@ -122,7 +122,7 @@ test('Day grouping and windowed filmstrip math keep bounds exact', () => {
   const groups = groupMediaByDay(visible, new Date('2026-11-23T18:00:00.000Z'));
   assert.ok(groups[0].label.startsWith('Today —'));
   const years = extractTimelineYears(groups);
-  assert.deepEqual(years, [2026, 2025]);
+  assert.deepEqual(years, [2026, 2025, 2024, 2023]);
 
   const win = getWindowedFilmstripIndices(5000, 100, 18);
   assert.equal(win.start, 82);
@@ -238,4 +238,77 @@ test('Patched GramJS uploads.js streams multi-megabyte browser Blob in <= 128 KB
   assert.equal(reassembled.byteLength, TOTAL_BYTES);
   assert.equal(reassembled.equals(sourcePayload), true, 'Streamed chunks must match original bytes bit-for-bit');
 });
+
+test('Curated Memories engine surfaces date-based previous-year anniversaries and excludes locked/trashed items', async () => {
+  const { buildCuratedMemories } = await import('./utils/timeline');
+
+  const refDate = new Date('2026-11-23T12:00:00.000Z');
+  const memories = buildCuratedMemories(SEED_MEDIA_ITEMS, refDate);
+
+  assert.ok(memories.length >= 4, 'Should generate multi-year anniversary & spotlight memories');
+
+  // Top memories must be descending previous-year anniversaries around Nov 23
+  assert.equal(memories[0].id, 'anniversary-2025');
+  assert.equal(memories[0].title, '1 year ago today');
+  assert.equal(memories[0].badge, 'On This Day');
+  assert.equal(memories[0].yearsAgo, 1);
+
+  assert.equal(memories[1].id, 'anniversary-2024');
+  assert.equal(memories[1].title, '2 years ago today');
+  assert.equal(memories[1].badge, 'On This Day');
+  assert.equal(memories[1].yearsAgo, 2);
+
+  assert.equal(memories[2].id, 'anniversary-2023');
+  assert.equal(memories[2].title, '3 years ago this week');
+  assert.equal(memories[2].yearsAgo, 3);
+
+  // Ensure locked items never leak into Memories
+  for (const mem of memories) {
+    assert.equal(mem.coverItem.isLocked, false);
+    assert.ok(mem.items.every((item) => !item.isLocked && !item.trashedAt));
+  }
+});
+
+test('Floating Date Scrubber Rail extracts descending years and months with exact firstDateKey anchors', async () => {
+  const { extractTimelineYearMonths } = await import('./utils/timeline');
+
+  const visible = SEED_MEDIA_ITEMS.filter((i) => !i.isLocked && !i.isArchived);
+  const groups = groupMediaByDay(visible, new Date('2026-11-23T18:00:00.000Z'));
+  const yearNodes = extractTimelineYearMonths(groups);
+
+  assert.deepEqual(
+    yearNodes.map((y) => y.year),
+    [2026, 2025, 2024, 2023]
+  );
+
+  // 2026 has Nov, Sep, Aug
+  assert.deepEqual(
+    yearNodes[0].months.map((m) => m.shortLabel),
+    ['Nov', 'Sep', 'Aug']
+  );
+  assert.equal(yearNodes[0].months[0].monthKey, '2026-11');
+  assert.equal(yearNodes[0].months[0].firstDateKey, '2026-11-23');
+
+  // 2025 has Nov, Oct, Jul
+  assert.deepEqual(
+    yearNodes[1].months.map((m) => m.shortLabel),
+    ['Nov', 'Oct', 'Jul']
+  );
+  assert.equal(yearNodes[1].months[1].fullLabel, 'October 2025');
+  assert.equal(yearNodes[1].months[1].firstDateKey, '2025-10-12');
+
+  // 2024 has Nov, Jun
+  assert.deepEqual(
+    yearNodes[2].months.map((m) => m.shortLabel),
+    ['Nov', 'Jun']
+  );
+  assert.equal(yearNodes[2].months[1].firstDateKey, '2024-06-16');
+
+  // 2023 has Nov
+  assert.deepEqual(
+    yearNodes[3].months.map((m) => m.shortLabel),
+    ['Nov']
+  );
+});
+
 

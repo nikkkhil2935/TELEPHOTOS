@@ -25,7 +25,7 @@ export class FramelyDatabase extends Dexie {
 
 export const db = new FramelyDatabase();
 
-const SEED_FLAG_KEY = 'framely_seed_v1_initialized';
+const SEED_FLAG_KEY = 'framely_seed_v2_memories';
 let seedInFlight: Promise<void> | null = null;
 
 export async function ensureSeedData(libraryId = DEFAULT_LIBRARY_ID): Promise<void> {
@@ -36,13 +36,15 @@ export async function ensureSeedData(libraryId = DEFAULT_LIBRARY_ID): Promise<vo
     const alreadyInitialized = window.localStorage.getItem(SEED_FLAG_KEY) === '1';
     const existingCount = await db.media.where('libraryId').equals(libraryId).count();
 
-    if (existingCount === 0 && !alreadyInitialized) {
+    if (!alreadyInitialized || existingCount === 0) {
       await db.transaction('rw', db.media, db.albums, db.personGroups, async () => {
-        const mediaCount = await db.media.where('libraryId').equals(libraryId).count();
-        if (mediaCount === 0) {
-          await db.media.bulkPut(
-            SEED_MEDIA_ITEMS.map((item) => ({ ...item, libraryId }))
-          );
+        const existingMedia = await db.media.where('libraryId').equals(libraryId).toArray();
+        const existingIds = new Set(existingMedia.map((m) => m.messageId));
+        const missingMedia = SEED_MEDIA_ITEMS.filter((item) => !existingIds.has(item.messageId)).map(
+          (item) => ({ ...item, libraryId })
+        );
+        if (missingMedia.length > 0) {
+          await db.media.bulkPut(missingMedia);
         }
         const albumCount = await db.albums.where('libraryId').equals(libraryId).count();
         if (albumCount === 0) {

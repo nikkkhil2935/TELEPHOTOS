@@ -1,14 +1,19 @@
 'use client';
 
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { AnimatePresence, motion } from 'motion/react';
 import {
   Archive,
+  Calendar,
   Check,
+  ChevronLeft,
+  ChevronRight,
   Download,
   FolderPlus,
   Grid2x2,
   Grid3x3,
   Heart,
+  Layers,
   LayoutGrid,
   Lock,
   Play,
@@ -18,11 +23,13 @@ import {
   X,
 } from 'lucide-react';
 import type { GridDensity, MediaItem } from '@/lib/types';
+import { formatDuration, groupMediaByDay } from '@/lib/utils/security';
 import {
-  extractTimelineYears,
-  formatDuration,
-  groupMediaByDay,
-} from '@/lib/utils/security';
+  buildCuratedMemories,
+  extractTimelineYearMonths,
+  type TimelineMonthNode,
+  type TimelineYearNode,
+} from '@/lib/utils/timeline';
 
 interface TimelineViewProps {
   title?: string;
@@ -79,10 +86,19 @@ export function TimelineView({
   const selectedIds = controlledSelectedIds ?? internalSelectedIds;
   const setSelectedIds = onSelectedIdsChange ?? setInternalSelectedIds;
   const lastClickedIndexRef = useRef<number | null>(null);
-  const yearSectionRefs = useRef<Record<number, HTMLDivElement | null>>({});
+  const dateSectionRefs = useRef<Record<string, HTMLElement | null>>({});
+  const memoriesTrackRef = useRef<HTMLDivElement | null>(null);
+  const scrubToastTimerRef = useRef<number | null>(null);
+  const highlightTimerRef = useRef<number | null>(null);
 
-  const dayGroups = useMemo(() => groupMediaByDay(items), [items]);
-  const years = useMemo(() => extractTimelineYears(dayGroups), [dayGroups]);
+  // Use a stable UTC calendar date matching the active session day
+  const referenceDate = useMemo(() => new Date(), []);
+
+  const dayGroups = useMemo(
+    () => groupMediaByDay(items, referenceDate),
+    [items, referenceDate]
+  );
+  const yearNodes = useMemo(() => extractTimelineYearMonths(dayGroups), [dayGroups]);
 
   // Flat ordered list matching visual grid order for Shift+Click range select & Lightbox order
   const orderedItems = useMemo(
@@ -90,43 +106,133 @@ export function TimelineView({
     [dayGroups]
   );
 
-  const memories = useMemo(() => {
-    if (!showMemories || orderedItems.length === 0) return [];
-    const favorites = orderedItems.filter((i) => i.isFavorite);
-    const pool = favorites.length >= 3 ? favorites : orderedItems;
-    return [
-      {
-        id: 'mem-golden',
-        title: 'Golden Hour Masters',
-        meta: 'November 2026',
-        item: pool[0],
+  // Curated date-based Memories highlights across previous years
+  const memories = useMemo(
+    () => (showMemories ? buildCuratedMemories(orderedItems, referenceDate) : []),
+    [orderedItems, showMemories, referenceDate]
+  );
+
+  // Horizontal carousel scroll arrows state
+  const [canScrollMemLeft, setCanScrollMemLeft] = useState(false);
+  const [canScrollMemRight, setCanScrollMemRight] = useState(true);
+
+  const updateMemoriesScrollButtons = useCallback(() => {
+    const el = memoriesTrackRef.current;
+    if (!el) return;
+    setCanScrollMemLeft(el.scrollLeft > 8);
+    setCanScrollMemRight(el.scrollLeft + el.clientWidth < el.scrollWidth - 8);
+  }, []);
+
+  useEffect(() => {
+    const el = memoriesTrackRef.current;
+    if (!el) return;
+    const raf = window.requestAnimationFrame(updateMemoriesScrollButtons);
+    el.addEventListener('scroll', updateMemoriesScrollButtons, { passive: true });
+    window.addEventListener('resize', updateMemoriesScrollButtons);
+    return () => {
+      window.cancelAnimationFrame(raf);
+      el.removeEventListener('scroll', updateMemoriesScrollButtons);
+      window.removeEventListener('resize', updateMemoriesScrollButtons);
+    };
+  }, [memories.length, updateMemoriesScrollButtons]);
+
+  const scrollMemoriesBy = (direction: 'left' | 'right') => {
+    const el = memoriesTrackRef.current;
+    if (!el) return;
+    const delta = direction === 'right' ? 440 : -440;
+    el.scrollBy({ left: delta, behavior: 'smooth' });
+  };
+
+  // Active Year/Month scroll-spy + scrub jump feedback for Floating Date Scrubber Rail
+  const defaultMonthKey = yearNodes[0]?.months[0]?.monthKey ?? null;
+  const defaultYear = yearNodes[0]?.year ?? null;
+  const [activeMonthKey, setActiveMonthKey] = useState<string | null>(null);
+  const [expandedYear, setExpandedYear] = useState<number | null>(null);
+  const [scrubCallout, setScrubCallout] = useState<{ label: string; count: number } | null>(null);
+  const [highlightedDateKey, setHighlightedDateKey] = useState<string | null>(null);
+
+  const effectiveMonthKey = activeMonthKey ?? defaultMonthKey;
+  const effectiveActiveYear = effectiveMonthKey
+    ? Number(effectiveMonthKey.slice(0, 4))
+    : defaultYear;
+  const effectiveExpandedYear = expandedYear ?? effectiveActiveYear;
+
+  useEffect(() => {
+    if (dayGroups.length === 0 || typeof IntersectionObserver === 'undefined') return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const visible = entries
+          .filter((entry) => entry.isIntersecting)
+          .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top);
+        const topEntry = visible[0];
+        if (!topEntry) return;
+        const monthKey = topEntry.target.getAttribute('data-month-key');
+        if (monthKey) {
+          setActiveMonthKey(monthKey);
+        }
       },
-      pool[1]
-        ? {
-            id: 'mem-portraits',
-            title: 'Studio & Light',
-            meta: 'Curated Selection',
-            item: pool[1],
-          }
-        : null,
-      pool[2]
-        ? {
-            id: 'mem-monsoon',
-            title: 'Western Ghats & Coast',
-            meta: 'Regional Highlights',
-            item: pool[2],
-          }
-        : null,
-      pool[3]
-        ? {
-            id: 'mem-travel',
-            title: '1 Year Ago · Autumn',
-            meta: '2025 Archive',
-            item: pool[3],
-          }
-        : null,
-    ].filter(Boolean) as Array<{ id: string; title: string; meta: string; item: MediaItem }>;
-  }, [orderedItems, showMemories]);
+      {
+        rootMargin: '-12% 0px -68% 0px',
+        threshold: 0,
+      }
+    );
+
+    for (const group of dayGroups) {
+      const node = dateSectionRefs.current[group.dateKey];
+      if (node) observer.observe(node);
+    }
+
+    return () => observer.disconnect();
+  }, [dayGroups]);
+
+  useEffect(() => {
+    return () => {
+      if (scrubToastTimerRef.current !== null) window.clearTimeout(scrubToastTimerRef.current);
+      if (highlightTimerRef.current !== null) window.clearTimeout(highlightTimerRef.current);
+    };
+  }, []);
+
+  const flashScrubFeedback = (dateKey: string, label: string, count: number) => {
+    if (scrubToastTimerRef.current !== null) window.clearTimeout(scrubToastTimerRef.current);
+    if (highlightTimerRef.current !== null) window.clearTimeout(highlightTimerRef.current);
+
+    setScrubCallout({ label, count });
+    setHighlightedDateKey(dateKey);
+
+    scrubToastTimerRef.current = window.setTimeout(() => {
+      setScrubCallout(null);
+    }, 1800);
+    highlightTimerRef.current = window.setTimeout(() => {
+      setHighlightedDateKey(null);
+    }, 1200);
+  };
+
+  const jumpToYear = (yearNode: TimelineYearNode) => {
+    const firstMonth = yearNode.months[0];
+    setExpandedYear(yearNode.year);
+    if (firstMonth) {
+      setActiveMonthKey(firstMonth.monthKey);
+    }
+    const target = dateSectionRefs.current[yearNode.firstDateKey];
+    if (target) {
+      target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+    flashScrubFeedback(
+      yearNode.firstDateKey,
+      firstMonth ? firstMonth.fullLabel : String(yearNode.year),
+      yearNode.totalCount
+    );
+  };
+
+  const jumpToMonth = (monthNode: TimelineMonthNode) => {
+    setExpandedYear(monthNode.year);
+    setActiveMonthKey(monthNode.monthKey);
+    const target = dateSectionRefs.current[monthNode.firstDateKey];
+    if (target) {
+      target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+    flashScrubFeedback(monthNode.firstDateKey, monthNode.fullLabel, monthNode.itemCount);
+  };
 
   const toggleSelectItem = (
     messageId: number,
@@ -174,15 +280,15 @@ export function TimelineView({
 
   const selectedArray = Array.from(selectedIds);
 
-  const scrollToYear = (year: number) => {
-    const target = yearSectionRefs.current[year];
-    if (target) {
-      target.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }
-  };
-
-  // Track which years have already received a ref anchor
-  const seenYearAnchors = new Set<number>();
+  const formattedReferenceDay = useMemo(
+    () =>
+      referenceDate.toLocaleDateString('en-US', {
+        month: 'short',
+        day: 'numeric',
+        timeZone: 'UTC',
+      }),
+    [referenceDate]
+  );
 
   return (
     <div className="relative px-4 sm:px-7 py-5 max-w-[1600px] mx-auto pb-24 lg:pb-12">
@@ -341,34 +447,96 @@ export function TimelineView({
         </div>
       </div>
 
-      {/* Memories Highlights Carousel (Photos Timeline Only) */}
+      {/* Curated Date-Based Memories Highlights Carousel */}
       {memories.length > 0 && (
-        <section aria-label="Memories highlights" className="mb-8">
-          <div className="flex items-center gap-2 mb-3">
-            <Sparkles className="w-4 h-4 text-[#0B57D0] dark:text-[#A8C7FA]" />
-            <h2 className="text-sm font-semibold text-[#1F1F1F] dark:text-zinc-100">
-              Memories
-            </h2>
+        <section
+          aria-label="Memories highlights"
+          data-testid="memories-carousel"
+          className="mb-8"
+        >
+          <div className="flex items-center justify-between gap-3 mb-3">
+            <div className="flex items-center gap-2 min-w-0">
+              <Sparkles className="w-4 h-4 text-[#0B57D0] dark:text-[#A8C7FA] shrink-0" />
+              <h2 className="text-sm font-semibold text-[#1F1F1F] dark:text-zinc-100">
+                Memories
+              </h2>
+              <span className="hidden sm:inline text-xs text-[#5F6368] dark:text-zinc-400 truncate">
+                · Curated for {formattedReferenceDay} across previous years
+              </span>
+            </div>
+
+            {/* Horizontal Scroll Controls */}
+            <div className="flex items-center gap-1 shrink-0">
+              <button
+                type="button"
+                onClick={() => scrollMemoriesBy('left')}
+                disabled={!canScrollMemLeft}
+                aria-label="Scroll memories left"
+                className="w-7 h-7 rounded-full border border-slate-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 text-[#444746] dark:text-zinc-300 flex items-center justify-center hover:bg-[#F8FAFD] dark:hover:bg-zinc-800 disabled:opacity-35 disabled:pointer-events-none transition-colors"
+              >
+                <ChevronLeft className="w-4 h-4" />
+              </button>
+              <button
+                type="button"
+                onClick={() => scrollMemoriesBy('right')}
+                disabled={!canScrollMemRight}
+                aria-label="Scroll memories right"
+                className="w-7 h-7 rounded-full border border-slate-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 text-[#444746] dark:text-zinc-300 flex items-center justify-center hover:bg-[#F8FAFD] dark:hover:bg-zinc-800 disabled:opacity-35 disabled:pointer-events-none transition-colors"
+              >
+                <ChevronRight className="w-4 h-4" />
+              </button>
+            </div>
           </div>
-          <div className="flex gap-3 overflow-x-auto no-scrollbar pb-1">
+
+          <div
+            ref={memoriesTrackRef}
+            className="flex gap-3.5 overflow-x-auto scroll-smooth snap-x snap-mandatory no-scrollbar pb-1"
+          >
             {memories.map((mem) => (
               <button
                 key={mem.id}
                 type="button"
-                onClick={() => onOpenMedia(mem.item, orderedItems)}
-                className="group relative shrink-0 w-44 sm:w-52 h-60 sm:h-64 rounded-2xl overflow-hidden bg-slate-100 dark:bg-zinc-900 text-left focus-visible:outline-2 focus-visible:outline-[#0B57D0]"
+                onClick={() =>
+                  onOpenMedia(
+                    mem.coverItem,
+                    mem.items.length > 1 ? mem.items : orderedItems
+                  )
+                }
+                aria-label={`Open memory ${mem.title} (${mem.eyebrow})`}
+                className="group relative shrink-0 snap-start w-44 sm:w-52 h-60 sm:h-64 rounded-2xl overflow-hidden bg-slate-100 dark:bg-zinc-900 text-left shadow-xs hover:shadow-md transition-shadow focus-visible:outline-2 focus-visible:outline-[#0B57D0]"
               >
                 <img
-                  src={mem.item.thumbnailDataUrl || mem.item.fullUrl}
+                  src={mem.coverItem.thumbnailDataUrl || mem.coverItem.fullUrl}
                   alt={mem.title}
                   referrerPolicy="no-referrer"
                   className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105"
                 />
-                <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent" />
-                <div className="absolute inset-x-0 bottom-0 p-4">
-                  <p className="text-[11px] font-medium text-white/80">{mem.meta}</p>
-                  <p className="text-sm font-bold text-white leading-snug mt-0.5">
+                <div className="absolute inset-0 bg-gradient-to-t from-black/85 via-black/25 to-black/20" />
+
+                {/* Top Overlay: Date-Proximity Label & Multi-Item Count */}
+                <div className="absolute top-3 inset-x-3 flex items-center justify-between gap-2">
+                  <span className="inline-flex items-center gap-1 rounded-md bg-black/50 backdrop-blur-sm px-2 py-0.5 text-[10px] font-semibold tracking-wide text-white/95">
+                    {mem.kind === 'anniversary' && <Calendar className="w-2.5 h-2.5" />}
+                    {mem.badge}
+                  </span>
+                  {mem.items.length > 1 && (
+                    <span className="inline-flex items-center gap-1 rounded-md bg-black/50 backdrop-blur-sm px-1.5 py-0.5 text-[10px] font-mono tabular-nums text-white/90">
+                      <Layers className="w-2.5 h-2.5" />
+                      {mem.items.length}
+                    </span>
+                  )}
+                </div>
+
+                {/* Bottom Editorial Typography */}
+                <div className="absolute inset-x-0 bottom-0 p-3.5 sm:p-4">
+                  <p className="text-[11px] font-medium text-white/80 tabular-nums">
+                    {mem.eyebrow}
+                  </p>
+                  <p className="text-sm sm:text-[15px] font-bold text-white leading-snug mt-0.5">
                     {mem.title}
+                  </p>
+                  <p className="text-[11px] text-white/75 truncate mt-0.5">
+                    {mem.subtitle}
                   </p>
                 </div>
               </button>
@@ -377,7 +545,7 @@ export function TimelineView({
         </section>
       )}
 
-      {/* Empty State */}
+      {/* Empty State or Timeline Grid + Sticky Floating Date Scrubber Rail */}
       {orderedItems.length === 0 ? (
         <div className="rounded-2xl border border-slate-200 dark:border-zinc-800 bg-[#F8FAFD] dark:bg-zinc-900/40 p-12 text-center mt-4">
           <h2 className="text-base font-semibold text-[#1F1F1F] dark:text-zinc-100">
@@ -396,160 +564,248 @@ export function TimelineView({
           </button>
         </div>
       ) : (
-        <div className="space-y-8 pr-0 lg:pr-16">
-          {dayGroups.map((group) => {
-            const isFirstOfYear = !seenYearAnchors.has(group.year);
-            if (isFirstOfYear) seenYearAnchors.add(group.year);
-            const allGroupSelected = group.items.every((i) => selectedIds.has(i.messageId));
+        <div className="relative flex items-start gap-4 lg:gap-6">
+          {/* Primary Day-Grouped Media Timeline */}
+          <div className="flex-1 min-w-0 space-y-8">
+            {dayGroups.map((group) => {
+              const allGroupSelected = group.items.every((i) => selectedIds.has(i.messageId));
+              const monthKey = group.dateKey.slice(0, 7);
+              const isHighlighted = highlightedDateKey === group.dateKey;
 
-            return (
-              <section
-                key={group.dateKey}
-                ref={(el) => {
-                  if (isFirstOfYear) {
-                    yearSectionRefs.current[group.year] = el as HTMLDivElement | null;
-                  }
-                }}
-                aria-label={group.label}
-                className="scroll-mt-20"
-              >
-                <div className="flex items-center justify-between gap-3 mb-3">
-                  <div className="flex items-center gap-2.5 min-w-0">
-                    <button
-                      type="button"
-                      onClick={() => toggleSelectGroup(group.items)}
-                      aria-label={`Select all items from ${group.label}`}
-                      aria-pressed={allGroupSelected}
-                      className={`w-5 h-5 rounded-full border flex items-center justify-center transition-colors shrink-0 ${
-                        allGroupSelected
-                          ? 'bg-[#0B57D0] border-[#0B57D0] text-white'
-                          : 'border-slate-300 dark:border-zinc-700 text-transparent hover:border-[#0B57D0]'
-                      }`}
-                    >
-                      <Check className="w-3 h-3 stroke-[3]" />
-                    </button>
-                    <h2 className="text-sm font-semibold text-[#1F1F1F] dark:text-zinc-100 truncate">
-                      {group.label}
-                    </h2>
-                    {group.locationSummary && (
-                      <span className="hidden sm:inline text-xs text-[#5F6368] dark:text-zinc-400 truncate">
-                        · {group.locationSummary}
-                      </span>
-                    )}
+              return (
+                <section
+                  key={group.dateKey}
+                  ref={(el) => {
+                    dateSectionRefs.current[group.dateKey] = el;
+                  }}
+                  data-date-key={group.dateKey}
+                  data-month-key={monthKey}
+                  data-year={group.year}
+                  aria-label={group.label}
+                  className="scroll-mt-20"
+                >
+                  <div
+                    className={`flex items-center justify-between gap-3 mb-3 rounded-xl transition-colors duration-300 ${
+                      isHighlighted
+                        ? 'bg-[#D3E3FD]/55 dark:bg-[#004A77]/50 px-2.5 py-1.5 -mx-2.5'
+                        : ''
+                    }`}
+                  >
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <button
+                        type="button"
+                        onClick={() => toggleSelectGroup(group.items)}
+                        aria-label={`Select all items from ${group.label}`}
+                        aria-pressed={allGroupSelected}
+                        className={`w-5 h-5 rounded-full border flex items-center justify-center transition-colors shrink-0 ${
+                          allGroupSelected
+                            ? 'bg-[#0B57D0] border-[#0B57D0] text-white'
+                            : 'border-slate-300 dark:border-zinc-700 text-transparent hover:border-[#0B57D0]'
+                        }`}
+                      >
+                        <Check className="w-3 h-3 stroke-[3]" />
+                      </button>
+                      <h2 className="text-sm font-semibold text-[#1F1F1F] dark:text-zinc-100 truncate">
+                        {group.label}
+                      </h2>
+                      {group.locationSummary && (
+                        <span className="hidden sm:inline text-xs text-[#5F6368] dark:text-zinc-400 truncate">
+                          · {group.locationSummary}
+                        </span>
+                      )}
+                    </div>
+                    <span className="text-xs text-[#5F6368] dark:text-zinc-500 font-mono tabular-nums shrink-0">
+                      {group.items.length}
+                    </span>
                   </div>
-                  <span className="text-xs text-[#5F6368] dark:text-zinc-500 font-mono tabular-nums shrink-0">
-                    {group.items.length}
-                  </span>
-                </div>
 
-                <div className={`grid ${DENSITY_GRID_CLASSES[density]}`}>
-                  {group.items.map((item) => {
-                    const flatIdx = orderedItems.findIndex(
-                      (x) => x.messageId === item.messageId
-                    );
-                    const isSelected = selectedIds.has(item.messageId);
-                    const isRaw = /\.(dng|arw|raf|cr3|nef)$/i.test(item.filename);
+                  <div className={`grid ${DENSITY_GRID_CLASSES[density]}`}>
+                    {group.items.map((item) => {
+                      const flatIdx = orderedItems.findIndex(
+                        (x) => x.messageId === item.messageId
+                      );
+                      const isSelected = selectedIds.has(item.messageId);
+                      const isRaw = /\.(dng|arw|raf|cr3|nef)$/i.test(item.filename);
+
+                      return (
+                        <div
+                          key={item.messageId}
+                          className={`group relative aspect-square overflow-hidden rounded-xl bg-slate-100 dark:bg-zinc-900 transition-all ${
+                            isSelected
+                              ? 'ring-3 ring-[#0B57D0] dark:ring-[#A8C7FA] scale-[0.96]'
+                              : ''
+                          }`}
+                        >
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              if (selectedIds.size > 0 || e.shiftKey) {
+                                toggleSelectItem(item.messageId, flatIdx, e.shiftKey);
+                              } else {
+                                onOpenMedia(item, orderedItems);
+                              }
+                            }}
+                            aria-label={`Open ${item.filename}`}
+                            className="w-full h-full block focus-visible:outline-2 focus-visible:outline-[#0B57D0]"
+                          >
+                            <img
+                              src={item.thumbnailDataUrl || item.fullUrl}
+                              alt={item.filename}
+                              referrerPolicy="no-referrer"
+                              loading="lazy"
+                              className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
+                            />
+                          </button>
+
+                          {/* Hover / Selection Checkmark */}
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              toggleSelectItem(item.messageId, flatIdx, e.shiftKey);
+                            }}
+                            aria-label={
+                              isSelected ? `Deselect ${item.filename}` : `Select ${item.filename}`
+                            }
+                            aria-pressed={isSelected}
+                            className={`absolute top-2 left-2 w-6 h-6 rounded-full flex items-center justify-center transition-all ${
+                              isSelected
+                                ? 'bg-[#0B57D0] text-white opacity-100 shadow'
+                                : 'bg-black/40 border border-white/80 text-white opacity-0 group-hover:opacity-100 focus-visible:opacity-100 hover:bg-[#0B57D0]'
+                            }`}
+                          >
+                            <Check className="w-3.5 h-3.5 stroke-[3]" />
+                          </button>
+
+                          {/* Video Duration Badge */}
+                          {item.kind === 'video' && (
+                            <span className="pointer-events-none absolute top-2 right-2 inline-flex items-center gap-1 rounded-full bg-black/65 px-2 py-0.5 text-[10px] font-mono tabular-nums text-white">
+                              <Play className="w-2.5 h-2.5 fill-current" />
+                              {formatDuration(item.durationMs)}
+                            </span>
+                          )}
+
+                          {/* Favorite & RAW Indicators */}
+                          <div className="pointer-events-none absolute bottom-2 inset-x-2 flex items-center justify-between">
+                            {isRaw ? (
+                              <span className="rounded bg-black/65 px-1.5 py-0.5 text-[10px] font-mono font-semibold text-white/95">
+                                RAW
+                              </span>
+                            ) : (
+                              <span />
+                            )}
+                            {item.isFavorite && (
+                              <span className="w-6 h-6 rounded-full bg-black/50 flex items-center justify-center text-white">
+                                <Heart className="w-3.5 h-3.5 fill-rose-400 text-rose-400" />
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </section>
+              );
+            })}
+          </div>
+
+          {/* Floating Date Scrubber Rail (Sticky to Right Margin of Timeline View) */}
+          {yearNodes.length > 0 && (
+            <aside
+              aria-label="Date scrubber"
+              className="hidden md:flex sticky top-20 self-start shrink-0 z-20 flex-col items-end"
+            >
+              <div className="relative">
+                {/* Floating Scrub Jump Callout Pill */}
+                <AnimatePresence>
+                  {scrubCallout && (
+                    <motion.div
+                      key={scrubCallout.label}
+                      data-testid="date-scrubber-callout"
+                      initial={{ opacity: 0, x: 8, scale: 0.94 }}
+                      animate={{ opacity: 1, x: 0, scale: 1 }}
+                      exit={{ opacity: 0, x: 6, scale: 0.95 }}
+                      transition={{ duration: 0.16 }}
+                      className="pointer-events-none absolute right-full mr-2.5 top-2 rounded-xl bg-[#1F1F1F] dark:bg-white text-white dark:text-[#1F1F1F] px-3 py-1.5 shadow-lg whitespace-nowrap"
+                    >
+                      <p className="text-xs font-semibold leading-tight">{scrubCallout.label}</p>
+                      <p className="text-[10px] opacity-75 font-mono tabular-nums">
+                        {scrubCallout.count} {scrubCallout.count === 1 ? 'item' : 'items'}
+                      </p>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+
+                <nav
+                  aria-label="Floating date scrubber rail"
+                  data-testid="date-scrubber-rail"
+                  className="flex flex-col items-center gap-1 rounded-2xl border border-slate-200/90 dark:border-zinc-700/80 bg-white/90 dark:bg-zinc-900/90 backdrop-blur-md px-1.5 py-2 shadow-sm w-[56px]"
+                >
+                  {yearNodes.map((yearNode) => {
+                    const isYearActive = effectiveActiveYear === yearNode.year;
+                    const isYearExpanded = effectiveExpandedYear === yearNode.year;
 
                     return (
                       <div
-                        key={item.messageId}
-                        className={`group relative aspect-square overflow-hidden rounded-xl bg-slate-100 dark:bg-zinc-900 transition-all ${
-                          isSelected
-                            ? 'ring-3 ring-[#0B57D0] dark:ring-[#A8C7FA] scale-[0.96]'
-                            : ''
-                        }`}
+                        key={yearNode.year}
+                        onMouseEnter={() => setExpandedYear(yearNode.year)}
+                        className="w-full flex flex-col items-center"
                       >
                         <button
                           type="button"
-                          onClick={(e) => {
-                            if (selectedIds.size > 0 || e.shiftKey) {
-                              toggleSelectItem(item.messageId, flatIdx, e.shiftKey);
-                            } else {
-                              onOpenMedia(item, orderedItems);
-                            }
-                          }}
-                          aria-label={`Open ${item.filename}`}
-                          className="w-full h-full block focus-visible:outline-2 focus-visible:outline-[#0B57D0]"
-                        >
-                          <img
-                            src={item.thumbnailDataUrl || item.fullUrl}
-                            alt={item.filename}
-                            referrerPolicy="no-referrer"
-                            loading="lazy"
-                            className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
-                          />
-                        </button>
-
-                        {/* Hover / Selection Checkmark */}
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            toggleSelectItem(item.messageId, flatIdx, e.shiftKey);
-                          }}
-                          aria-label={
-                            isSelected ? `Deselect ${item.filename}` : `Select ${item.filename}`
-                          }
-                          aria-pressed={isSelected}
-                          className={`absolute top-2 left-2 w-6 h-6 rounded-full flex items-center justify-center transition-all ${
-                            isSelected
-                              ? 'bg-[#0B57D0] text-white opacity-100 shadow'
-                              : 'bg-black/40 border border-white/80 text-white opacity-0 group-hover:opacity-100 focus-visible:opacity-100 hover:bg-[#0B57D0]'
+                          onClick={() => jumpToYear(yearNode)}
+                          aria-label={`Jump to ${yearNode.year}`}
+                          aria-current={isYearActive ? 'true' : undefined}
+                          className={`w-full py-1 rounded-xl text-[11px] font-mono font-bold tabular-nums transition-colors ${
+                            isYearActive
+                              ? 'bg-[#0B57D0] text-white shadow-xs'
+                              : 'text-[#444746] dark:text-zinc-300 hover:bg-[#D3E3FD] hover:text-[#0B57D0] dark:hover:bg-[#004A77] dark:hover:text-[#A8C7FA]'
                           }`}
                         >
-                          <Check className="w-3.5 h-3.5 stroke-[3]" />
+                          {yearNode.year}
                         </button>
 
-                        {/* Video Duration Badge */}
-                        {item.kind === 'video' && (
-                          <span className="pointer-events-none absolute top-2 right-2 inline-flex items-center gap-1 rounded-full bg-black/65 px-2 py-0.5 text-[10px] font-mono tabular-nums text-white">
-                            <Play className="w-2.5 h-2.5 fill-current" />
-                            {formatDuration(item.durationMs)}
-                          </span>
-                        )}
-
-                        {/* Favorite & RAW Indicators */}
-                        <div className="pointer-events-none absolute bottom-2 inset-x-2 flex items-center justify-between">
-                          {isRaw ? (
-                            <span className="rounded bg-black/65 px-1.5 py-0.5 text-[10px] font-mono font-semibold text-white/95">
-                              RAW
-                            </span>
-                          ) : (
-                            <span />
+                        {/* Nested Months Sub-Rail for Expanded / Active Year */}
+                        <AnimatePresence initial={false}>
+                          {isYearExpanded && yearNode.months.length > 0 && (
+                            <motion.div
+                              initial={{ opacity: 0, height: 0 }}
+                              animate={{ opacity: 1, height: 'auto' }}
+                              exit={{ opacity: 0, height: 0 }}
+                              transition={{ duration: 0.16 }}
+                              className="w-full overflow-hidden flex flex-col items-center gap-0.5 pt-1 pb-1"
+                            >
+                              {yearNode.months.map((monthNode) => {
+                                const isMonthActive = effectiveMonthKey === monthNode.monthKey;
+                                return (
+                                  <button
+                                    key={monthNode.monthKey}
+                                    type="button"
+                                    onClick={() => jumpToMonth(monthNode)}
+                                    aria-label={`Jump to ${monthNode.fullLabel}`}
+                                    aria-current={isMonthActive ? 'location' : undefined}
+                                    title={`${monthNode.fullLabel} (${monthNode.itemCount})`}
+                                    className={`w-full py-0.5 rounded-lg text-[10px] font-medium transition-colors flex items-center justify-center gap-1 ${
+                                      isMonthActive
+                                        ? 'bg-[#D3E3FD] dark:bg-[#004A77] text-[#0B57D0] dark:text-[#C2E7FF] font-semibold'
+                                        : 'text-[#5F6368] dark:text-zinc-400 hover:bg-slate-100 dark:hover:bg-zinc-800 hover:text-[#1F1F1F] dark:hover:text-zinc-100'
+                                    }`}
+                                  >
+                                    <span>{monthNode.shortLabel}</span>
+                                  </button>
+                                );
+                              })}
+                            </motion.div>
                           )}
-                          {item.isFavorite && (
-                            <span className="w-6 h-6 rounded-full bg-black/50 flex items-center justify-center text-white">
-                              <Heart className="w-3.5 h-3.5 fill-rose-400 text-rose-400" />
-                            </span>
-                          )}
-                        </div>
+                        </AnimatePresence>
                       </div>
                     );
                   })}
-                </div>
-              </section>
-            );
-          })}
+                </nav>
+              </div>
+            </aside>
+          )}
         </div>
-      )}
-
-      {/* Floating Frosted Vertical Date Scrubber Rail (Desktop Right Margin) */}
-      {years.length > 0 && (
-        <nav
-          aria-label="Jump to year"
-          className="hidden lg:flex fixed right-4 top-1/2 -translate-y-1/2 z-20 flex-col items-center gap-1 rounded-full border border-slate-200/80 dark:border-zinc-700/80 bg-white/85 dark:bg-zinc-900/85 backdrop-blur-md px-1.5 py-2 shadow-sm"
-        >
-          {years.map((year) => (
-            <button
-              key={year}
-              type="button"
-              onClick={() => scrollToYear(year)}
-              className="px-2 py-1 rounded-full text-[11px] font-mono font-semibold tabular-nums text-[#5F6368] dark:text-zinc-300 hover:bg-[#D3E3FD] hover:text-[#0B57D0] dark:hover:bg-[#004A77] dark:hover:text-[#A8C7FA] transition-colors"
-            >
-              {year}
-            </button>
-          ))}
-        </nav>
       )}
     </div>
   );
