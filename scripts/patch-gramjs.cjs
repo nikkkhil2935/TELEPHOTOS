@@ -211,7 +211,7 @@ async function framelyReadBlobRange(blob, begin, end) {
 
   content = content.replace(
     'else if (typeof File !== "undefined" && thumb instanceof File) {',
-    'else if (framelyIsDomFileOrBlob(thumb)) {'
+    'else if (framelyIsDomFileOrBlob(thumb) || (typeof CustomFile !== "undefined" && thumb instanceof CustomFile)) {'
   );
 
   // 6. Patch fileToBuffer fallback to recognize Blob in addition to File
@@ -230,10 +230,22 @@ async function framelyReadBlobRange(blob, begin, end) {
   console.log('[patch-gramjs] Patched uploads.js V2: browser File/Blob objects now stream in 128 KB chunks via CustomBuffer.');
 }
 
+function patchDownloads() {
+  const target = path.join(TG_DIR, 'client', 'downloads.js');
+  if (!fs.existsSync(target)) return;
+  let content = fs.readFileSync(target, 'utf8');
+  if (content.includes('partSizeKb = 64;')) {
+    content = content.replace(/partSizeKb = 64;/g, 'partSizeKb = 512;');
+    fs.writeFileSync(target, content, 'utf8');
+    console.log('[patch-gramjs] Patched downloads.js for 512 KB chunk throughput.');
+  }
+}
+
 try {
   if (fs.existsSync(TG_DIR)) {
     patchGenerationHelpers();
     patchUploads();
+    patchDownloads();
   } else {
     console.log('[patch-gramjs] telegram package not installed yet, skipping.');
   }

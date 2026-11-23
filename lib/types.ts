@@ -110,6 +110,7 @@ export interface TelegramSessionPayload {
   apiId: number;
   apiHash: string;
   sessionString: string;
+  userId?: string;
   phoneNumber?: string;
   username?: string;
   displayName?: string;
@@ -118,7 +119,7 @@ export interface TelegramSessionPayload {
   channelTitle: string;
   dcEndpoint: string;
   connectedAt: string;
-  mode: 'live-mtproto' | 'local-vault';
+  mode: 'live-mtproto';
 }
 
 export interface TransferJob {

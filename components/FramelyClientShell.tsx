@@ -1,5 +1,6 @@
 'use client';
 
+import '@/lib/polyfills';
 import React, { useCallback, useEffect, useState } from 'react';
 import type { ThemeMode } from '@/lib/types';
 import { LandingPage } from './LandingPage';

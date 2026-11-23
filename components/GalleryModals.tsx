@@ -4,14 +4,20 @@ import React, { useEffect, useRef, useState } from 'react';
 import QRCode from 'qrcode';
 import {
   AlertTriangle,
+  Check,
   CheckCircle2,
   Cloud,
   Download,
+  ExternalLink,
+  Eye,
+  EyeOff,
   FileKey2,
   FolderPlus,
   HardDrive,
   KeyRound,
+  Loader2,
   Lock,
+  LogOut,
   Monitor,
   Moon,
   QrCode,
@@ -34,9 +40,13 @@ import {
   saveEncryptedSessionVault,
   setAutoLockMinutes,
 } from '@/lib/services/vaultService';
-import { clearAllIndexedDb, restoreDemoLibrary } from '@/lib/db';
-import { TELEGRAM_WSS_GATEWAYS, tgClient } from '@/lib/services/tgClient';
+import { clearAllIndexedDb } from '@/lib/db';
+import { tgClient } from '@/lib/services/tgClient';
 import { formatBytes, sanitizeCaptionText } from '@/lib/utils/security';
+import {
+  validateInternationalPhone,
+  validateTelegramCredentials,
+} from '@/lib/utils/telegram';
 
 /* -------------------------------------------------------------------------- */
 /* 1. Upload Uncompressed Master Modal                                        */
@@ -45,7 +55,10 @@ interface UploadModalProps {
   open: boolean;
   defaultLocked?: boolean;
   albums: AlbumItem[];
+  isConnected: boolean;
+  channelTitle?: string;
   onClose: () => void;
+  onRequireAuth: () => void;
   onUploadFiles: (files: File[], options: { album?: string; isLocked?: boolean }) => Promise<void>;
 }
 
@@ -53,7 +66,10 @@ export function UploadModal({
   open,
   defaultLocked = false,
   albums,
+  isConnected,
+  channelTitle,
   onClose,
+  onRequireAuth,
   onUploadFiles,
 }: UploadModalProps) {
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -74,6 +90,11 @@ export function UploadModal({
   };
 
   const handleSubmit = async () => {
+    if (!isConnected) {
+      onClose();
+      onRequireAuth();
+      return;
+    }
     if (selectedFiles.length === 0) {
       setError('Choose at least one photo or video to upload.');
       return;
@@ -100,29 +121,49 @@ export function UploadModal({
       role="dialog"
       aria-modal="true"
       aria-label="Upload original masters"
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 backdrop-blur-xs p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 backdrop-blur-xs p-3 sm:p-4"
     >
-      <div className="w-full max-w-lg rounded-2xl border border-slate-200 dark:border-zinc-800 bg-white dark:bg-[#1E1F20] shadow-2xl overflow-hidden">
-        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 dark:border-zinc-800">
-          <div>
-            <h2 className="text-base font-bold text-[#1F1F1F] dark:text-zinc-100">
+      <div className="w-full max-w-lg max-h-[92dvh] flex flex-col rounded-2xl border border-slate-200 dark:border-zinc-800 bg-white dark:bg-[#1E1F20] shadow-2xl overflow-hidden">
+        <div className="flex items-center justify-between px-5 sm:px-6 py-4 border-b border-slate-200 dark:border-zinc-800 shrink-0">
+          <div className="min-w-0 pr-2">
+            <h2 className="text-base font-bold text-[#1F1F1F] dark:text-zinc-100 truncate">
               Upload Uncompressed Masters
             </h2>
-            <p className="text-xs text-[#5F6368] dark:text-zinc-400">
-              Sent with forceDocument: true · Up to 2,048 MB per file · EXIF preserved 100%
+            <p className="text-xs text-[#5F6368] dark:text-zinc-400 truncate">
+              {isConnected
+                ? `Target: ${channelTitle || 'Telegram Vault'} · 128 KB chunk stream`
+                : 'Connect Telegram first to store files losslessly'}
             </p>
           </div>
           <button
             type="button"
             onClick={onClose}
             aria-label="Close upload dialog"
-            className="w-8 h-8 rounded-full flex items-center justify-center text-slate-500 hover:bg-slate-100 dark:hover:bg-zinc-800"
+            className="w-8 h-8 rounded-full flex items-center justify-center text-slate-500 hover:bg-slate-100 dark:hover:bg-zinc-800 shrink-0"
           >
             <X className="w-4 h-4" />
           </button>
         </div>
 
-        <div className="p-6 space-y-4">
+        <div className="p-5 sm:p-6 space-y-4 overflow-y-auto">
+          {!isConnected && (
+            <div className="rounded-xl border border-amber-200 dark:border-amber-900/60 bg-amber-50 dark:bg-amber-950/30 p-3.5 flex items-center justify-between gap-3">
+              <p className="text-xs text-amber-800 dark:text-amber-200">
+                Sign in with your Telegram account to stream uncompressed masters into your private channel.
+              </p>
+              <button
+                type="button"
+                onClick={() => {
+                  onClose();
+                  onRequireAuth();
+                }}
+                className="shrink-0 rounded-full bg-[#0B57D0] text-white px-3.5 py-1.5 text-xs font-semibold"
+              >
+                Connect
+              </button>
+            </div>
+          )}
+
           <div
             onDragOver={(e) => {
               e.preventDefault();
@@ -134,7 +175,7 @@ export function UploadModal({
               setDragOver(false);
               handleFileList(e.dataTransfer.files);
             }}
-            className={`rounded-2xl border-2 border-dashed p-7 text-center transition-colors ${
+            className={`rounded-2xl border-2 border-dashed p-6 sm:p-7 text-center transition-colors ${
               dragOver
                 ? 'border-[#0B57D0] bg-[#D3E3FD]/30 dark:bg-[#004A77]/30'
                 : 'border-slate-300 dark:border-zinc-700 bg-[#F8FAFD] dark:bg-zinc-900/60'
@@ -145,7 +186,7 @@ export function UploadModal({
               Drop photos, RAW masters, or 4K videos here
             </p>
             <p className="text-xs text-[#5F6368] dark:text-zinc-400 mt-1">
-              Streams in 128 KB chunks · SHA-256 checksum & WebP thumbnail computed locally
+              Uploaded with forceDocument: true · Up to 2,048 MB per file · EXIF preserved 100%
             </p>
             <input
               ref={inputRef}
@@ -191,7 +232,7 @@ export function UploadModal({
                 id="upload-album-select"
                 value={selectedAlbum}
                 onChange={(e) => setSelectedAlbum(e.target.value)}
-                className="w-full rounded-xl border border-slate-300 dark:border-zinc-700 bg-[#F8FAFD] dark:bg-zinc-900 px-3 py-2 text-xs text-[#1F1F1F] dark:text-zinc-100"
+                className="w-full rounded-xl border border-slate-300 dark:border-zinc-700 bg-[#F8FAFD] dark:bg-zinc-900 px-3 py-2 text-base sm:text-xs text-[#1F1F1F] dark:text-zinc-100"
               >
                 <option value="">Timeline only</option>
                 {albums.map((a) => (
@@ -225,7 +266,7 @@ export function UploadModal({
           )}
         </div>
 
-        <div className="flex items-center justify-end gap-2.5 px-6 py-4 border-t border-slate-200 dark:border-zinc-800 bg-[#F8FAFD] dark:bg-zinc-900/50">
+        <div className="flex items-center justify-end gap-2.5 px-5 sm:px-6 py-4 border-t border-slate-200 dark:border-zinc-800 bg-[#F8FAFD] dark:bg-zinc-900/50 shrink-0">
           <button
             type="button"
             onClick={onClose}
@@ -235,12 +276,16 @@ export function UploadModal({
           </button>
           <button
             type="button"
-            disabled={uploading || selectedFiles.length === 0}
+            disabled={uploading || (isConnected && selectedFiles.length === 0)}
             onClick={handleSubmit}
             className="inline-flex items-center gap-1.5 rounded-full bg-[#0B57D0] hover:bg-[#0842A0] disabled:opacity-50 px-5 py-2 text-xs font-semibold text-white transition-colors"
           >
             <Upload className="w-3.5 h-3.5" />
-            {uploading ? 'Uploading lossless master...' : `Upload ${selectedFiles.length || ''} ${selectedFiles.length === 1 ? 'File' : 'Files'}`}
+            {!isConnected
+              ? 'Connect Telegram'
+              : uploading
+                ? 'Streaming to Telegram...'
+                : `Upload ${selectedFiles.length || ''} ${selectedFiles.length === 1 ? 'File' : 'Files'}`}
           </button>
         </div>
       </div>
@@ -249,13 +294,14 @@ export function UploadModal({
 }
 
 /* -------------------------------------------------------------------------- */
-/* 2. Telegram MTProto Direct Auth Modal (Phone + QR Code)                    */
+/* 2. Real Telegram MTProto Direct Auth Modal (Phone OTP + 2FA & Live QR)     */
 /* -------------------------------------------------------------------------- */
 interface TelegramAuthModalProps {
   open: boolean;
-  session: TelegramSessionPayload;
+  session: TelegramSessionPayload | null;
   onClose: () => void;
   onSessionUpdated: (session: TelegramSessionPayload) => void;
+  onLoggedOut: () => void;
 }
 
 export function TelegramAuthModal({
@@ -263,66 +309,205 @@ export function TelegramAuthModal({
   session,
   onClose,
   onSessionUpdated,
+  onLoggedOut,
 }: TelegramAuthModalProps) {
-  const [authTab, setAuthTab] = useState<'qr' | 'phone'>('phone');
-  const [apiId, setApiId] = useState(session.apiId ? String(session.apiId) : '');
-  const [apiHash, setApiHash] = useState(session.apiHash || '');
-  const [phone, setPhone] = useState(session.phoneNumber || '');
+  const envApiId = process.env.NEXT_PUBLIC_TELEGRAM_API_ID || '';
+  const envApiHash = process.env.NEXT_PUBLIC_TELEGRAM_API_HASH || '';
+
+  const [authTab, setAuthTab] = useState<'phone' | 'qr'>('phone');
+  const [apiId, setApiId] = useState(session?.apiId ? String(session.apiId) : envApiId);
+  const [apiHash, setApiHash] = useState(session?.apiHash || envApiHash);
+  const [showApiHash, setShowApiHash] = useState(false);
+
+  // Phone OTP + 2FA state
+  const [phone, setPhone] = useState(session?.phoneNumber || '');
+  const [phoneStep, setPhoneStep] = useState<'creds' | 'code' | '2fa'>('creds');
+  const [phoneCodeHash, setPhoneCodeHash] = useState('');
+  const [isCodeViaApp, setIsCodeViaApp] = useState(true);
+  const [otpCode, setOtpCode] = useState('');
+  const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [vaultPassphrase, setVaultPassphrase] = useState('');
-  const [qrDataUrl, setQrDataUrl] = useState<string>('');
-  const [connecting, setConnecting] = useState(false);
-  const [statusMsg, setStatusMsg] = useState<string | null>(null);
+
+  // Live QR state
+  const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
+  const [qrExpiresIn, setQrExpiresIn] = useState(0);
+  const [qrNeeds2fa, setQrNeeds2fa] = useState(false);
+  const [qrPassword, setQrPassword] = useState('');
+  const qrPasswordResolverRef = useRef<((pw: string) => void) | null>(null);
+
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!open || authTab !== 'qr') return;
-    const token = `tg://login?token=${btoa(`framely_mtproto_${Date.now()}`).replace(/=/g, '')}`;
-    QRCode.toDataURL(token, { width: 200, margin: 1 })
-      .then((url) => setQrDataUrl(url))
-      .catch(() => setQrDataUrl(''));
-  }, [open, authTab]);
+    if (!open) {
+      void tgClient.cancelPendingAuth();
+      setError(null);
+      setLoading(false);
+      setQrDataUrl(null);
+      setQrExpiresIn(0);
+      setQrNeeds2fa(false);
+      setQrPassword('');
+      setPhoneStep('creds');
+      setOtpCode('');
+      setPassword('');
+    }
+  }, [open]);
+
+  useEffect(() => {
+    if (qrExpiresIn <= 0) return;
+    const timer = window.setInterval(() => {
+      setQrExpiresIn((prev) => (prev <= 1 ? 0 : prev - 1));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [qrExpiresIn]);
 
   if (!open) return null;
 
-  const handleConnect = async (e: React.FormEvent) => {
+  const handleRequestOtp = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
-    setStatusMsg(null);
-    const parsedApiId = Number(apiId.trim());
-    if (!Number.isInteger(parsedApiId) || parsedApiId <= 0) {
-      setError('Enter a valid numeric Telegram API ID from my.telegram.org.');
+
+    const credCheck = validateTelegramCredentials(apiId, apiHash);
+    if (!credCheck.valid) {
+      setError(credCheck.error);
       return;
     }
-    if (apiHash.trim().length < 16) {
-      setError('Enter your 32-character Telegram API Hash from my.telegram.org.');
-      return;
-    }
-    if (authTab === 'phone' && !phone.trim().startsWith('+')) {
-      setError('Enter your phone number in international format (e.g. +14155550199).');
+    const phoneCheck = validateInternationalPhone(phone);
+    if (!phoneCheck.valid) {
+      setError(phoneCheck.error);
       return;
     }
 
-    setConnecting(true);
-    setStatusMsg('Opening direct browser WSS tunnel to wss://flora-1.web.telegram.org:443...');
+    setLoading(true);
     try {
-      const nextSession = await tgClient.connectLiveMTProto({
-        apiId: parsedApiId,
-        apiHash: apiHash.trim(),
-        phoneNumber: phone.trim(),
-      });
-      if (vaultPassphrase.length >= 6) {
-        await saveEncryptedSessionVault(nextSession, vaultPassphrase);
-      }
-      onSessionUpdated(nextSession);
-      setStatusMsg('Connected directly to Telegram MTProto 2.0 and verified Framely Photos Vault.');
-    } catch (err) {
-      setError(
-        err instanceof Error
-          ? err.message
-          : 'MTProto handshake did not complete. Check your Telegram API credentials or network WebSocket access.'
+      const res = await tgClient.sendPhoneCode(
+        credCheck.apiId,
+        credCheck.apiHash,
+        phoneCheck.phone
       );
+      setPhone(phoneCheck.phone);
+      setPhoneCodeHash(res.phoneCodeHash);
+      setIsCodeViaApp(res.isCodeViaApp);
+      setPhoneStep('code');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to request Telegram login code.');
     } finally {
-      setConnecting(false);
+      setLoading(false);
+    }
+  };
+
+  const handleVerifyOtp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+
+    const credCheck = validateTelegramCredentials(apiId, apiHash);
+    if (!credCheck.valid) {
+      setError(credCheck.error);
+      return;
+    }
+    if (!otpCode.trim()) {
+      setError('Enter the verification code sent to your Telegram app or SMS.');
+      return;
+    }
+    if (phoneStep === '2fa' && !password.trim()) {
+      setError('Enter your Telegram 2FA Cloud Password.');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const nextSession = await tgClient.verifyPhoneCodeAndSignIn({
+        apiId: credCheck.apiId,
+        apiHash: credCheck.apiHash,
+        phoneNumber: phone.trim(),
+        phoneCode: otpCode.trim(),
+        phoneCodeHash,
+        password: password.trim() || undefined,
+        vaultPassphrase: vaultPassphrase.trim().length >= 6 ? vaultPassphrase.trim() : undefined,
+      });
+      onSessionUpdated(nextSession);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Verification failed.';
+      if (msg === '2FA_REQUIRED') {
+        setPhoneStep('2fa');
+        setError('Two-Step Verification is enabled on this account. Enter your 2FA Cloud Password.');
+      } else {
+        setError(msg);
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleStartQr = async () => {
+    setError(null);
+    const credCheck = validateTelegramCredentials(apiId, apiHash);
+    if (!credCheck.valid) {
+      setError(credCheck.error);
+      return;
+    }
+
+    setLoading(true);
+    setQrDataUrl(null);
+    setQrNeeds2fa(false);
+    setQrPassword('');
+
+    try {
+      const nextSession = await tgClient.startQrLogin({
+        apiId: credCheck.apiId,
+        apiHash: credCheck.apiHash,
+        vaultPassphrase: vaultPassphrase.trim().length >= 6 ? vaultPassphrase.trim() : undefined,
+        onQrToken: async (qrUrl, expires) => {
+          try {
+            const url = await QRCode.toDataURL(qrUrl, {
+              width: 240,
+              margin: 1,
+              color: { dark: '#0f172a', light: '#ffffff' },
+            });
+            setQrDataUrl(url);
+            setQrExpiresIn(Math.max(10, expires - Math.floor(Date.now() / 1000)));
+            setLoading(false);
+          } catch {
+            setError('Failed to render QR code.');
+            setLoading(false);
+          }
+        },
+        onPasswordNeeded: async () => {
+          setQrNeeds2fa(true);
+          setLoading(false);
+          return new Promise<string>((resolve) => {
+            qrPasswordResolverRef.current = resolve;
+          });
+        },
+      });
+      onSessionUpdated(nextSession);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'QR login expired or cancelled.');
+      setLoading(false);
+    }
+  };
+
+  const handleQr2faSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!qrPassword.trim()) {
+      setError('Enter your 2FA Cloud Password.');
+      return;
+    }
+    setError(null);
+    setLoading(true);
+    qrPasswordResolverRef.current?.(qrPassword.trim());
+    qrPasswordResolverRef.current = null;
+  };
+
+  const handleLogout = async () => {
+    setLoading(true);
+    try {
+      await tgClient.logoutFromTelegram();
+      onLoggedOut();
+      onClose();
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -331,33 +516,125 @@ export function TelegramAuthModal({
       role="dialog"
       aria-modal="true"
       aria-label="Connect Telegram MTProto Vault"
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 backdrop-blur-xs p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 backdrop-blur-xs p-3 sm:p-4"
     >
-      <div className="w-full max-w-lg rounded-2xl border border-slate-200 dark:border-zinc-800 bg-white dark:bg-[#1E1F20] shadow-2xl overflow-hidden">
-        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 dark:border-zinc-800">
-          <div>
-            <h2 className="text-base font-bold text-[#1F1F1F] dark:text-zinc-100">
-              Connect Telegram MTProto 2.0
+      <div className="w-full max-w-lg max-h-[92dvh] flex flex-col rounded-2xl border border-slate-200 dark:border-zinc-800 bg-white dark:bg-[#1E1F20] shadow-2xl overflow-hidden">
+        <div className="flex items-center justify-between px-5 sm:px-6 py-4 border-b border-slate-200 dark:border-zinc-800 shrink-0">
+          <div className="min-w-0 pr-2">
+            <h2 className="text-base font-bold text-[#1F1F1F] dark:text-zinc-100 truncate">
+              {session ? 'Telegram MTProto Account' : 'Sign In with Telegram'}
             </h2>
-            <p className="text-xs text-[#5F6368] dark:text-zinc-400">
-              Direct browser-to-Telegram WSS · Zero middleman relay servers
+            <p className="text-xs text-[#5F6368] dark:text-zinc-400 truncate">
+              Direct browser-to-Telegram MTProto 2.0 WSS · Zero relay servers
             </p>
           </div>
           <button
             type="button"
             onClick={onClose}
             aria-label="Close Telegram sign in modal"
-            className="w-8 h-8 rounded-full flex items-center justify-center text-slate-500 hover:bg-slate-100 dark:hover:bg-zinc-800"
+            className="w-8 h-8 rounded-full flex items-center justify-center text-slate-500 hover:bg-slate-100 dark:hover:bg-zinc-800 shrink-0"
           >
             <X className="w-4 h-4" />
           </button>
         </div>
 
-        <div className="p-6 space-y-5">
+        <div className="p-5 sm:p-6 space-y-4 overflow-y-auto">
+          {session && (
+            <div className="rounded-2xl border border-emerald-200 dark:border-emerald-900/60 bg-emerald-50/70 dark:bg-emerald-950/30 p-4 flex flex-wrap items-center justify-between gap-3">
+              <div className="min-w-0">
+                <div className="flex items-center gap-1.5 text-xs font-semibold text-emerald-700 dark:text-emerald-300">
+                  <CheckCircle2 className="w-4 h-4" />
+                  Connected: {session.displayName}
+                </div>
+                <p className="text-[11px] font-mono text-emerald-800/80 dark:text-emerald-400/80 mt-0.5 truncate">
+                  Channel: {session.channelTitle} ({session.channelId})
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={loading}
+                onClick={handleLogout}
+                className="inline-flex items-center gap-1.5 rounded-full border border-red-300 dark:border-red-800 bg-white dark:bg-zinc-900 px-3.5 py-1.5 text-xs font-semibold text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/50"
+              >
+                <LogOut className="w-3.5 h-3.5" />
+                Sign Out
+              </button>
+            </div>
+          )}
+
+          {/* Shared API Credentials Box */}
+          <div className="space-y-3 rounded-2xl border border-slate-200 dark:border-zinc-800 bg-[#F8FAFD] dark:bg-zinc-900/60 p-4">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs font-semibold text-[#1F1F1F] dark:text-zinc-100">
+                Telegram API Credentials
+              </span>
+              <a
+                href="https://my.telegram.org/apps"
+                target="_blank"
+                rel="noreferrer noopener"
+                className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#0B57D0] dark:text-[#A8C7FA] hover:underline"
+              >
+                Get keys at my.telegram.org
+                <ExternalLink className="w-3 h-3" />
+              </a>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label htmlFor="tg-api-id" className="block text-[11px] font-semibold text-slate-600 dark:text-zinc-400 mb-1">
+                  API ID
+                </label>
+                <input
+                  id="tg-api-id"
+                  type="text"
+                  inputMode="numeric"
+                  value={apiId}
+                  onChange={(e) => {
+                    setApiId(e.target.value);
+                    setError(null);
+                  }}
+                  placeholder="e.g. 24910221"
+                  className="w-full rounded-xl border border-slate-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-3 py-2 text-base sm:text-xs font-mono text-[#1F1F1F] dark:text-zinc-100"
+                />
+              </div>
+              <div>
+                <label htmlFor="tg-api-hash" className="block text-[11px] font-semibold text-slate-600 dark:text-zinc-400 mb-1">
+                  API Hash (32 hex)
+                </label>
+                <div className="relative">
+                  <input
+                    id="tg-api-hash"
+                    type={showApiHash ? 'text' : 'password'}
+                    value={apiHash}
+                    onChange={(e) => {
+                      setApiHash(e.target.value);
+                      setError(null);
+                    }}
+                    placeholder="32-char hex hash"
+                    className="w-full rounded-xl border border-slate-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-3 py-2 pr-8 text-base sm:text-xs font-mono text-[#1F1F1F] dark:text-zinc-100"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowApiHash((v) => !v)}
+                    aria-label={showApiHash ? 'Hide API Hash' : 'Show API Hash'}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-slate-500"
+                  >
+                    {showApiHash ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Auth Method Switcher */}
           <div className="flex gap-1 p-1 rounded-xl bg-[#F8FAFD] dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800">
             <button
               type="button"
-              onClick={() => setAuthTab('phone')}
+              onClick={() => {
+                void tgClient.cancelPendingAuth();
+                setAuthTab('phone');
+                setError(null);
+                setLoading(false);
+              }}
               className={`flex-1 inline-flex items-center justify-center gap-1.5 py-2 rounded-lg text-xs font-semibold transition-colors ${
                 authTab === 'phone'
                   ? 'bg-white dark:bg-zinc-800 text-[#0B57D0] dark:text-[#A8C7FA] shadow-xs'
@@ -365,11 +642,16 @@ export function TelegramAuthModal({
               }`}
             >
               <Smartphone className="w-3.5 h-3.5" />
-              Phone & API Key
+              Phone OTP
             </button>
             <button
               type="button"
-              onClick={() => setAuthTab('qr')}
+              onClick={() => {
+                void tgClient.cancelPendingAuth();
+                setAuthTab('qr');
+                setError(null);
+                setLoading(false);
+              }}
               className={`flex-1 inline-flex items-center justify-center gap-1.5 py-2 rounded-lg text-xs font-semibold transition-colors ${
                 authTab === 'qr'
                   ? 'bg-white dark:bg-zinc-800 text-[#0B57D0] dark:text-[#A8C7FA] shadow-xs'
@@ -377,121 +659,244 @@ export function TelegramAuthModal({
               }`}
             >
               <QrCode className="w-3.5 h-3.5" />
-              QR Session Auth
+              Live QR Code
             </button>
           </div>
 
           {authTab === 'qr' ? (
-            <div className="text-center space-y-3 py-2">
-              {qrDataUrl ? (
-                <div className="inline-block p-3 rounded-2xl bg-white border border-slate-200">
-                  <img
-                    src={qrDataUrl}
-                    alt="Telegram MTProto QR Login Code"
-                    className="w-44 h-44"
-                  />
+            <div className="flex flex-col items-center text-center space-y-3 py-1">
+              {loading && !qrDataUrl ? (
+                <div className="w-48 h-48 rounded-2xl border border-dashed border-slate-300 dark:border-zinc-700 bg-[#F8FAFD] dark:bg-zinc-900 flex flex-col items-center justify-center gap-2">
+                  <Loader2 className="w-6 h-6 animate-spin text-[#0B57D0] dark:text-[#A8C7FA]" />
+                  <span className="text-xs text-[#5F6368] dark:text-zinc-400">
+                    Connecting Telegram WSS...
+                  </span>
                 </div>
+              ) : qrDataUrl ? (
+                <>
+                  <div className="p-3 rounded-2xl bg-white border border-slate-200 shadow-xs">
+                    <img
+                      src={qrDataUrl}
+                      alt="Live Telegram MTProto QR Login Code"
+                      className="w-44 h-44 object-contain"
+                    />
+                  </div>
+                  <p className="text-xs text-[#5F6368] dark:text-zinc-400 max-w-xs leading-relaxed">
+                    Open Telegram on your phone → Settings → Devices → <strong>Link Desktop Device</strong>.
+                  </p>
+                  <div className="flex items-center gap-3 text-xs">
+                    {qrExpiresIn > 0 ? (
+                      <span className="font-mono tabular-nums font-semibold text-[#0B57D0] dark:text-[#A8C7FA]">
+                        Expires in {qrExpiresIn}s
+                      </span>
+                    ) : (
+                      <span className="text-amber-600 dark:text-amber-400 font-medium">Expired</span>
+                    )}
+                    <button
+                      type="button"
+                      onClick={handleStartQr}
+                      className="inline-flex items-center gap-1 font-semibold text-[#0B57D0] dark:text-[#A8C7FA] hover:underline"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" />
+                      Refresh QR
+                    </button>
+                  </div>
+                </>
               ) : (
-                <div className="w-44 h-44 mx-auto rounded-2xl bg-slate-100 dark:bg-zinc-900 animate-pulse" />
+                <div className="space-y-3 py-3">
+                  <p className="text-xs text-[#5F6368] dark:text-zinc-400 max-w-xs mx-auto">
+                    Enter your API ID & API Hash above, then generate a real rotating Telegram login QR token directly over MTProto WSS.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={handleStartQr}
+                    className="inline-flex items-center gap-2 rounded-full bg-[#0B57D0] hover:bg-[#0842A0] text-white px-5 py-2.5 text-xs font-semibold transition-colors"
+                  >
+                    <QrCode className="w-4 h-4" />
+                    Generate Telegram QR Code
+                  </button>
+                </div>
               )}
-              <p className="text-xs text-[#5F6368] dark:text-zinc-400 max-w-sm mx-auto leading-relaxed">
-                Open Telegram on your phone → Settings → Devices → Link Desktop Device. Requires your personal API ID & Hash from{' '}
-                <span className="font-mono text-[#0B57D0] dark:text-[#A8C7FA]">my.telegram.org</span>.
-              </p>
-            </div>
-          ) : (
-            <form onSubmit={handleConnect} className="space-y-3.5">
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label htmlFor="tg-api-id" className="block text-xs font-semibold text-slate-700 dark:text-zinc-300 mb-1">
-                    Telegram API ID
-                  </label>
-                  <input
-                    id="tg-api-id"
-                    type="text"
-                    value={apiId}
-                    onChange={(e) => setApiId(e.target.value)}
-                    placeholder="e.g. 24910221"
-                    className="w-full rounded-xl border border-slate-300 dark:border-zinc-700 bg-[#F8FAFD] dark:bg-zinc-900 px-3 py-2 text-xs font-mono text-[#1F1F1F] dark:text-zinc-100"
-                  />
-                </div>
-                <div>
-                  <label htmlFor="tg-phone" className="block text-xs font-semibold text-slate-700 dark:text-zinc-300 mb-1">
-                    Phone Number
-                  </label>
-                  <input
-                    id="tg-phone"
-                    type="tel"
-                    value={phone}
-                    onChange={(e) => setPhone(e.target.value)}
-                    placeholder="+91 98200 00000"
-                    className="w-full rounded-xl border border-slate-300 dark:border-zinc-700 bg-[#F8FAFD] dark:bg-zinc-900 px-3 py-2 text-xs font-mono text-[#1F1F1F] dark:text-zinc-100"
-                  />
-                </div>
-              </div>
 
+              {qrNeeds2fa && (
+                <form onSubmit={handleQr2faSubmit} className="w-full max-w-xs space-y-2 text-left pt-1">
+                  <label htmlFor="auth-qr-2fa" className="text-xs font-semibold text-amber-700 dark:text-amber-300 flex items-center gap-1.5">
+                    <Lock className="w-3.5 h-3.5" />
+                    2FA Cloud Password Required
+                  </label>
+                  <input
+                    id="auth-qr-2fa"
+                    type="password"
+                    value={qrPassword}
+                    onChange={(e) => setQrPassword(e.target.value)}
+                    placeholder="Enter 2FA Cloud Password"
+                    className="w-full rounded-xl border border-amber-300 dark:border-amber-700 bg-[#F8FAFD] dark:bg-zinc-900 px-3 py-2 text-base sm:text-xs text-[#1F1F1F] dark:text-zinc-100"
+                  />
+                  <button
+                    type="submit"
+                    disabled={loading}
+                    className="w-full rounded-full bg-amber-600 hover:bg-amber-700 text-white py-2 text-xs font-semibold"
+                  >
+                    {loading ? 'Verifying 2FA...' : 'Verify 2FA Password'}
+                  </button>
+                </form>
+              )}
+            </div>
+          ) : phoneStep === 'creds' ? (
+            <form onSubmit={handleRequestOtp} className="space-y-3.5">
               <div>
-                <label htmlFor="tg-api-hash" className="block text-xs font-semibold text-slate-700 dark:text-zinc-300 mb-1">
-                  Telegram API Hash
+                <label htmlFor="tg-phone" className="block text-xs font-semibold text-slate-700 dark:text-zinc-300 mb-1">
+                  Phone Number (International Format)
                 </label>
                 <input
-                  id="tg-api-hash"
-                  type="password"
-                  value={apiHash}
-                  onChange={(e) => setApiHash(e.target.value)}
-                  placeholder="32-character hex hash from my.telegram.org"
-                  className="w-full rounded-xl border border-slate-300 dark:border-zinc-700 bg-[#F8FAFD] dark:bg-zinc-900 px-3 py-2 text-xs font-mono text-[#1F1F1F] dark:text-zinc-100"
+                  id="tg-phone"
+                  type="tel"
+                  autoComplete="tel"
+                  value={phone}
+                  onChange={(e) => {
+                    setPhone(e.target.value);
+                    setError(null);
+                  }}
+                  placeholder="+1 415 555 0199"
+                  className="w-full rounded-xl border border-slate-300 dark:border-zinc-700 bg-[#F8FAFD] dark:bg-zinc-900 px-3.5 py-2.5 text-base sm:text-xs font-mono text-[#1F1F1F] dark:text-zinc-100"
                 />
               </div>
 
               <div>
                 <label htmlFor="tg-vault-pass" className="block text-xs font-semibold text-slate-700 dark:text-zinc-300 mb-1">
-                  Encrypt Session in Browser Vault (AES-256-GCM, optional)
+                  Encrypt Session with AES-256-GCM Passphrase (optional)
                 </label>
                 <input
                   id="tg-vault-pass"
                   type="password"
                   value={vaultPassphrase}
                   onChange={(e) => setVaultPassphrase(e.target.value)}
-                  placeholder="Master passphrase (min 6 chars)"
-                  className="w-full rounded-xl border border-slate-300 dark:border-zinc-700 bg-[#F8FAFD] dark:bg-zinc-900 px-3 py-2 text-xs text-[#1F1F1F] dark:text-zinc-100"
+                  placeholder="Min 6 chars (leave empty for instant unlock)"
+                  className="w-full rounded-xl border border-slate-300 dark:border-zinc-700 bg-[#F8FAFD] dark:bg-zinc-900 px-3.5 py-2.5 text-base sm:text-xs text-[#1F1F1F] dark:text-zinc-100"
                 />
               </div>
 
-              <div className="rounded-xl bg-[#F8FAFD] dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800 p-3 text-[11px] font-mono text-slate-600 dark:text-zinc-400">
-                Direct Gateway: {TELEGRAM_WSS_GATEWAYS[4]}
-              </div>
-
-              {error && (
-                <div role="alert" className="rounded-xl bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-900/60 px-3.5 py-2.5 text-xs text-red-700 dark:text-red-300">
-                  {error}
-                </div>
-              )}
-
-              {statusMsg && (
-                <div className="rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900/60 px-3.5 py-2.5 text-xs text-emerald-700 dark:text-emerald-300">
-                  {statusMsg}
-                </div>
-              )}
-
-              <div className="flex items-center justify-end gap-2.5 pt-2">
+              <div className="flex items-center justify-end gap-2 pt-1">
                 <button
                   type="button"
                   onClick={onClose}
                   className="rounded-full px-4 py-2 text-xs font-semibold text-slate-600 dark:text-zinc-300 hover:bg-slate-100 dark:hover:bg-zinc-800"
                 >
-                  Continue in Local Vault
+                  Cancel
                 </button>
                 <button
                   type="submit"
-                  disabled={connecting}
+                  disabled={loading}
                   className="inline-flex items-center gap-1.5 rounded-full bg-[#0B57D0] hover:bg-[#0842A0] disabled:opacity-50 px-5 py-2 text-xs font-semibold text-white transition-colors"
                 >
-                  <Cloud className="w-3.5 h-3.5" />
-                  {connecting ? 'Handshaking WSS...' : 'Connect Direct MTProto'}
+                  {loading ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      Sending Code...
+                    </>
+                  ) : (
+                    <>
+                      <Cloud className="w-3.5 h-3.5" />
+                      Send Login Code
+                    </>
+                  )}
                 </button>
               </div>
             </form>
+          ) : (
+            <form onSubmit={handleVerifyOtp} className="space-y-3.5">
+              <div className="rounded-xl bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-900/60 px-3.5 py-2.5 text-xs text-[#0B57D0] dark:text-[#A8C7FA]">
+                Login code sent to <strong className="font-mono">{phone}</strong>{' '}
+                {isCodeViaApp ? 'in your Telegram app.' : 'via SMS.'}
+              </div>
+
+              <div>
+                <label htmlFor="tg-otp-code" className="block text-xs font-semibold text-slate-700 dark:text-zinc-300 mb-1">
+                  Verification Code
+                </label>
+                <input
+                  id="tg-otp-code"
+                  type="text"
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  value={otpCode}
+                  onChange={(e) => {
+                    setOtpCode(e.target.value);
+                    setError(null);
+                  }}
+                  placeholder="12345"
+                  className="w-full rounded-xl border border-slate-300 dark:border-zinc-700 bg-[#F8FAFD] dark:bg-zinc-900 px-4 py-2.5 text-center text-lg font-mono tracking-[0.35em] font-bold text-[#1F1F1F] dark:text-zinc-100"
+                />
+              </div>
+
+              {phoneStep === '2fa' && (
+                <div className="rounded-xl border border-amber-300 dark:border-amber-800 bg-amber-50/70 dark:bg-amber-950/30 p-3 space-y-2">
+                  <label htmlFor="tg-2fa-pass" className="flex items-center gap-1.5 text-xs font-semibold text-amber-800 dark:text-amber-300">
+                    <Lock className="w-3.5 h-3.5" />
+                    2FA Cloud Password
+                  </label>
+                  <div className="relative">
+                    <input
+                      id="tg-2fa-pass"
+                      type={showPassword ? 'text' : 'password'}
+                      value={password}
+                      onChange={(e) => {
+                        setPassword(e.target.value);
+                        setError(null);
+                      }}
+                      placeholder="Enter your 2FA Cloud Password"
+                      className="w-full rounded-xl border border-amber-300 dark:border-amber-700 bg-white dark:bg-zinc-900 px-3 py-2 pr-9 text-base sm:text-xs text-[#1F1F1F] dark:text-zinc-100"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowPassword((v) => !v)}
+                      aria-label={showPassword ? 'Hide password' : 'Show password'}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-slate-500"
+                    >
+                      {showPassword ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              <div className="flex items-center gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPhoneStep('creds');
+                    setOtpCode('');
+                    setPassword('');
+                    setError(null);
+                  }}
+                  className="rounded-full border border-slate-300 dark:border-zinc-700 px-4 py-2 text-xs font-semibold text-slate-600 dark:text-zinc-300"
+                >
+                  Back
+                </button>
+                <button
+                  type="submit"
+                  disabled={loading}
+                  className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-full bg-[#0B57D0] hover:bg-[#0842A0] disabled:opacity-50 px-5 py-2 text-xs font-semibold text-white transition-colors"
+                >
+                  {loading ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      Verifying...
+                    </>
+                  ) : (
+                    <>
+                      <Check className="w-3.5 h-3.5" />
+                      {phoneStep === '2fa' ? 'Verify 2FA & Sign In' : 'Sign In'}
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
+          )}
+
+          {error && (
+            <div role="alert" className="rounded-xl bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-900/60 px-3.5 py-2.5 text-xs text-red-700 dark:text-red-300">
+              {error}
+            </div>
           )}
         </div>
       </div>
@@ -505,11 +910,13 @@ export function TelegramAuthModal({
 interface SettingsModalProps {
   open: boolean;
   theme: ThemeMode;
-  session: TelegramSessionPayload;
+  session: TelegramSessionPayload | null;
   onThemeChange: (t: ThemeMode) => void;
   onClose: () => void;
   onOpenTelegramAuth: () => void;
-  onLibraryReset: () => Promise<void>;
+  onOpenRebuildIndex: () => void;
+  onLockVault: () => void;
+  onLoggedOut: () => void;
 }
 
 export function SettingsModal({
@@ -519,7 +926,9 @@ export function SettingsModal({
   onThemeChange,
   onClose,
   onOpenTelegramAuth,
-  onLibraryReset,
+  onOpenRebuildIndex,
+  onLockVault,
+  onLoggedOut,
 }: SettingsModalProps) {
   const [autoLock, setAutoLock] = useState(() => getAutoLockMinutes());
   const [vaultPass, setVaultPass] = useState('');
@@ -527,6 +936,8 @@ export function SettingsModal({
   const [confirmWipe, setConfirmWipe] = useState(false);
 
   if (!open) return null;
+
+  const hasEncryptedVault = Boolean(loadEncryptedVaultEnvelope());
 
   const handleSaveAutoLock = (minutes: number) => {
     setAutoLock(minutes);
@@ -539,15 +950,20 @@ export function SettingsModal({
   };
 
   const handleSealSessionVault = async () => {
+    if (!session) {
+      setVaultFeedback('Sign in with Telegram first to encrypt your session vault.');
+      return;
+    }
     if (vaultPass.length < 6) {
       setVaultFeedback('Enter a passphrase of at least 6 characters to encrypt the session vault.');
       return;
     }
     try {
       await saveEncryptedSessionVault(session, vaultPass);
+      tgClient.saveSession(session, vaultPass);
       setVaultPass('');
       setVaultFeedback(
-        'Session vault encrypted with PBKDF2 (100,000 SHA-256 rounds) + AES-256-GCM in localStorage.'
+        'Session vault encrypted with PBKDF2 (100,000 SHA-256 rounds) + AES-256-GCM.'
       );
     } catch (err) {
       setVaultFeedback(err instanceof Error ? err.message : 'Encryption failed.');
@@ -555,23 +971,21 @@ export function SettingsModal({
   };
 
   const handleExportRecoveryKit = async () => {
-    let envelope = loadEncryptedVaultEnvelope();
+    const envelope = loadEncryptedVaultEnvelope();
     if (!envelope) {
-      envelope = await saveEncryptedSessionVault(
-        session,
-        vaultPass.length >= 6 ? vaultPass : 'framely-recovery-default-key'
-      );
+      setVaultFeedback('Seal your session with a passphrase above first, then export the Recovery Kit.');
+      return;
     }
-    const text = buildEmergencyRecoveryKit(envelope, session.channelTitle);
+    const text = buildEmergencyRecoveryKit(envelope, session?.channelTitle || 'Framely Photos Vault');
     downloadTextFile('framely-emergency-recovery-kit.txt', text);
     setVaultFeedback('Downloaded framely-emergency-recovery-kit.txt with salt, IV, and encrypted envelope.');
   };
 
   const handlePanicWipe = async () => {
+    await tgClient.logoutFromTelegram();
     await executePanicWipe(clearAllIndexedDb);
-    tgClient.disconnect();
     setConfirmWipe(false);
-    setVaultFeedback('Panic Wipe complete: IndexedDB, keys, and localStorage purged.');
+    onLoggedOut();
     onClose();
   };
 
@@ -580,29 +994,31 @@ export function SettingsModal({
       role="dialog"
       aria-modal="true"
       aria-label="Framely Settings and Vault Security"
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 backdrop-blur-xs p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 backdrop-blur-xs p-3 sm:p-4"
     >
-      <div className="w-full max-w-xl max-h-[88vh] flex flex-col rounded-2xl border border-slate-200 dark:border-zinc-800 bg-white dark:bg-[#1E1F20] shadow-2xl overflow-hidden">
-        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 dark:border-zinc-800 shrink-0">
-          <div>
-            <h2 className="text-base font-bold text-[#1F1F1F] dark:text-zinc-100">
-              Vault Settings & Zero-Knowledge Security
+      <div className="w-full max-w-xl max-h-[90dvh] flex flex-col rounded-2xl border border-slate-200 dark:border-zinc-800 bg-white dark:bg-[#1E1F20] shadow-2xl overflow-hidden">
+        <div className="flex items-center justify-between px-5 sm:px-6 py-4 border-b border-slate-200 dark:border-zinc-800 shrink-0">
+          <div className="min-w-0 pr-2">
+            <h2 className="text-base font-bold text-[#1F1F1F] dark:text-zinc-100 truncate">
+              Settings & Vault Security
             </h2>
-            <p className="text-xs text-[#5F6368] dark:text-zinc-400">
-              {session.channelTitle} · Channel {session.channelId}
+            <p className="text-xs text-[#5F6368] dark:text-zinc-400 truncate">
+              {session
+                ? `${session.channelTitle} · Channel ${session.channelId}`
+                : 'Not connected to Telegram'}
             </p>
           </div>
           <button
             type="button"
             onClick={onClose}
             aria-label="Close settings"
-            className="w-8 h-8 rounded-full flex items-center justify-center text-slate-500 hover:bg-slate-100 dark:hover:bg-zinc-800"
+            className="w-8 h-8 rounded-full flex items-center justify-center text-slate-500 hover:bg-slate-100 dark:hover:bg-zinc-800 shrink-0"
           >
             <X className="w-4 h-4" />
           </button>
         </div>
 
-        <div className="p-6 space-y-6 overflow-y-auto">
+        <div className="p-5 sm:p-6 space-y-6 overflow-y-auto">
           {/* Theme Mode */}
           <section className="space-y-2.5">
             <h3 className="text-xs font-semibold text-slate-500 dark:text-zinc-400">
@@ -611,9 +1027,9 @@ export function SettingsModal({
             <div className="grid grid-cols-3 gap-2">
               {(
                 [
-                  { id: 'light', label: 'Google White', Icon: Sun },
-                  { id: 'dark', label: 'Slate Dark', Icon: Moon },
-                  { id: 'oled', label: 'Pure OLED', Icon: Monitor },
+                  { id: 'light', label: 'White', Icon: Sun },
+                  { id: 'dark', label: 'Dark', Icon: Moon },
+                  { id: 'oled', label: 'OLED', Icon: Monitor },
                 ] as const
               ).map(({ id, label, Icon }) => (
                 <button
@@ -621,7 +1037,7 @@ export function SettingsModal({
                   type="button"
                   onClick={() => onThemeChange(id)}
                   aria-pressed={theme === id}
-                  className={`flex items-center justify-center gap-2 rounded-xl border px-3 py-2.5 text-xs font-semibold transition-colors ${
+                  className={`flex items-center justify-center gap-1.5 rounded-xl border px-3 py-2.5 text-xs font-semibold transition-colors ${
                     theme === id
                       ? 'border-[#0B57D0] bg-[#D3E3FD]/50 dark:bg-[#004A77]/50 text-[#0B57D0] dark:text-[#A8C7FA]'
                       : 'border-slate-200 dark:border-zinc-800 text-slate-700 dark:text-zinc-300 hover:bg-slate-50 dark:hover:bg-zinc-800/60'
@@ -634,51 +1050,83 @@ export function SettingsModal({
             </div>
           </section>
 
-          {/* Telegram Channel Connection */}
-          <section className="pt-4 border-t border-slate-200 dark:border-zinc-800 space-y-2.5">
-            <div className="flex items-center justify-between">
-              <div>
+          {/* Telegram Channel Connection & Index Rebuild */}
+          <section className="pt-4 border-t border-slate-200 dark:border-zinc-800 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="min-w-0">
                 <h3 className="text-sm font-semibold text-[#1F1F1F] dark:text-zinc-100">
-                  Telegram MTProto Channel
+                  Telegram MTProto Cloud
                 </h3>
                 <p className="text-xs text-[#5F6368] dark:text-zinc-400">
-                  Mode: {session.mode === 'live-mtproto' ? 'Direct MTProto 2.0 WSS' : 'Local IndexedDB Vault (Ready for MTProto)'}
+                  {session
+                    ? `Signed in as ${session.displayName} (${session.dcEndpoint})`
+                    : 'No active Telegram session'}
                 </p>
               </div>
-              <button
-                type="button"
-                onClick={() => {
-                  onClose();
-                  onOpenTelegramAuth();
-                }}
-                className="rounded-full border border-slate-300 dark:border-zinc-700 px-3.5 py-1.5 text-xs font-semibold text-[#0B57D0] dark:text-[#A8C7FA] hover:bg-[#D3E3FD]/40 dark:hover:bg-[#004A77]/40 transition-colors"
-              >
-                Configure MTProto
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    onClose();
+                    onOpenTelegramAuth();
+                  }}
+                  className="rounded-full border border-slate-300 dark:border-zinc-700 px-3.5 py-1.5 text-xs font-semibold text-[#0B57D0] dark:text-[#A8C7FA] hover:bg-[#D3E3FD]/40 dark:hover:bg-[#004A77]/40 transition-colors"
+                >
+                  {session ? 'Manage Account' : 'Sign In'}
+                </button>
+                {session && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onClose();
+                      onOpenRebuildIndex();
+                    }}
+                    className="inline-flex items-center gap-1.5 rounded-full border border-slate-300 dark:border-zinc-700 px-3.5 py-1.5 text-xs font-semibold text-slate-700 dark:text-zinc-200 hover:bg-slate-50 dark:hover:bg-zinc-800 transition-colors"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    Rebuild Index
+                  </button>
+                )}
+              </div>
             </div>
           </section>
 
           {/* Zero-Knowledge Session Encryption & Auto-Lock */}
           <section className="pt-4 border-t border-slate-200 dark:border-zinc-800 space-y-3">
-            <div className="flex items-center gap-2">
-              <ShieldCheck className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
-              <h3 className="text-sm font-semibold text-[#1F1F1F] dark:text-zinc-100">
-                AES-256-GCM Session Vault & Auto-Lock
-              </h3>
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <ShieldCheck className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+                <h3 className="text-sm font-semibold text-[#1F1F1F] dark:text-zinc-100">
+                  AES-256-GCM Session Vault & Auto-Lock
+                </h3>
+              </div>
+              {hasEncryptedVault && session && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onClose();
+                    onLockVault();
+                  }}
+                  className="inline-flex items-center gap-1 rounded-full bg-slate-100 dark:bg-zinc-800 px-3 py-1 text-[11px] font-semibold text-[#1F1F1F] dark:text-zinc-200"
+                >
+                  <Lock className="w-3 h-3" />
+                  Lock Now
+                </button>
+              )}
             </div>
 
-            <div className="flex gap-2">
+            <div className="flex flex-col sm:flex-row gap-2">
               <input
                 type="password"
                 value={vaultPass}
                 onChange={(e) => setVaultPass(e.target.value)}
-                placeholder="Master passphrase to seal localStorage vault"
-                className="flex-1 rounded-xl border border-slate-300 dark:border-zinc-700 bg-[#F8FAFD] dark:bg-zinc-900 px-3 py-2 text-xs text-[#1F1F1F] dark:text-zinc-100"
+                placeholder="Master passphrase (min 6 chars)"
+                className="flex-1 rounded-xl border border-slate-300 dark:border-zinc-700 bg-[#F8FAFD] dark:bg-zinc-900 px-3 py-2 text-base sm:text-xs text-[#1F1F1F] dark:text-zinc-100"
               />
               <button
                 type="button"
                 onClick={handleSealSessionVault}
-                className="inline-flex items-center gap-1.5 rounded-xl bg-[#0B57D0] hover:bg-[#0842A0] text-white px-3.5 py-2 text-xs font-semibold whitespace-nowrap"
+                className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-[#0B57D0] hover:bg-[#0842A0] text-white px-4 py-2 text-xs font-semibold whitespace-nowrap"
               >
                 <KeyRound className="w-3.5 h-3.5" />
                 Seal Vault
@@ -716,18 +1164,6 @@ export function SettingsModal({
                 <FileKey2 className="w-3.5 h-3.5 text-[#0B57D0] dark:text-[#A8C7FA]" />
                 Export Emergency Recovery Kit
               </button>
-              <button
-                type="button"
-                onClick={async () => {
-                  await restoreDemoLibrary(session.channelId);
-                  await onLibraryReset();
-                  setVaultFeedback('Restored curated demo vault items to IndexedDB.');
-                }}
-                className="inline-flex items-center gap-1.5 rounded-xl border border-slate-300 dark:border-zinc-700 px-3.5 py-2 text-xs font-semibold text-slate-700 dark:text-zinc-300 hover:bg-slate-50 dark:hover:bg-zinc-800 transition-colors"
-              >
-                <RefreshCw className="w-3.5 h-3.5" />
-                Restore Demo Vault
-              </button>
             </div>
 
             {vaultFeedback && (
@@ -744,7 +1180,7 @@ export function SettingsModal({
               <h3 className="text-sm font-semibold">Emergency Panic Wipe</h3>
             </div>
             <p className="text-xs text-[#5F6368] dark:text-zinc-400">
-              Immediately purges all IndexedDB media records, cached thumbnails, encrypted session keys, and localStorage entries from this browser.
+              Revokes the Telegram session and immediately purges all IndexedDB media caches, encrypted session keys, and localStorage entries from this browser.
             </p>
             {!confirmWipe ? (
               <button
@@ -756,7 +1192,7 @@ export function SettingsModal({
                 Panic Wipe Browser Vault
               </button>
             ) : (
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
                   onClick={handlePanicWipe}
@@ -816,7 +1252,7 @@ export function AddToAlbumModal({
       role="dialog"
       aria-modal="true"
       aria-label="Add selected items to album"
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 backdrop-blur-xs p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 backdrop-blur-xs p-3 sm:p-4"
     >
       <div className="w-full max-w-md rounded-2xl border border-slate-200 dark:border-zinc-800 bg-white dark:bg-[#1E1F20] shadow-2xl overflow-hidden">
         <div className="flex items-center justify-between px-5 py-4 border-b border-slate-200 dark:border-zinc-800">
@@ -840,7 +1276,7 @@ export function AddToAlbumModal({
               value={newName}
               onChange={(e) => setNewName(e.target.value)}
               placeholder="New album name..."
-              className="flex-1 rounded-xl border border-slate-300 dark:border-zinc-700 bg-[#F8FAFD] dark:bg-zinc-900 px-3 py-2 text-xs text-[#1F1F1F] dark:text-zinc-100"
+              className="flex-1 rounded-xl border border-slate-300 dark:border-zinc-700 bg-[#F8FAFD] dark:bg-zinc-900 px-3 py-2 text-base sm:text-xs text-[#1F1F1F] dark:text-zinc-100"
             />
             <button
               type="submit"
@@ -891,10 +1327,10 @@ export function TransfersModal({
       role="dialog"
       aria-modal="true"
       aria-label="MTProto transfers activity"
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-xs p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-xs p-3 sm:p-4"
     >
-      <div className="w-full max-w-md rounded-2xl border border-slate-200 dark:border-zinc-800 bg-white dark:bg-[#1E1F20] shadow-2xl overflow-hidden">
-        <div className="flex items-center justify-between px-5 py-4 border-b border-slate-200 dark:border-zinc-800">
+      <div className="w-full max-w-md max-h-[85dvh] flex flex-col rounded-2xl border border-slate-200 dark:border-zinc-800 bg-white dark:bg-[#1E1F20] shadow-2xl overflow-hidden">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-slate-200 dark:border-zinc-800 shrink-0">
           <h2 className="text-sm font-bold text-[#1F1F1F] dark:text-zinc-100">
             MTProto Chunk Transfers
           </h2>
@@ -907,10 +1343,10 @@ export function TransfersModal({
             <X className="w-4 h-4" />
           </button>
         </div>
-        <div className="p-5 max-h-80 overflow-y-auto space-y-3">
+        <div className="p-5 overflow-y-auto space-y-3">
           {jobs.length === 0 ? (
             <p className="text-xs text-[#5F6368] dark:text-zinc-400 text-center py-6">
-              No active uploads or ZIP exports yet. Every file transfers in 128 KB chunks directly over WebSockets.
+              No active uploads or ZIP exports yet. Every file transfers in 128 KB chunks directly over Telegram MTProto WebSockets.
             </p>
           ) : (
             jobs.map((job) => (
@@ -955,11 +1391,13 @@ export function StorageQuotaModal({
   open,
   usedBytes,
   itemCount,
+  channelTitle,
   onClose,
 }: {
   open: boolean;
   usedBytes: number;
   itemCount: number;
+  channelTitle?: string;
   onClose: () => void;
 }) {
   if (!open) return null;
@@ -968,7 +1406,7 @@ export function StorageQuotaModal({
       role="dialog"
       aria-modal="true"
       aria-label="Telegram unlimited storage breakdown"
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-xs p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-xs p-3 sm:p-4"
     >
       <div className="w-full max-w-md rounded-2xl border border-slate-200 dark:border-zinc-800 bg-white dark:bg-[#1E1F20] shadow-2xl overflow-hidden">
         <div className="flex items-center justify-between px-5 py-4 border-b border-slate-200 dark:border-zinc-800">
@@ -989,20 +1427,26 @@ export function StorageQuotaModal({
         </div>
         <div className="p-5 space-y-4 text-xs text-[#5F6368] dark:text-zinc-300">
           <div className="rounded-xl bg-[#F8FAFD] dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800 p-4 space-y-2">
-            <div className="flex items-center justify-between">
-              <span>Current Vault Usage</span>
-              <span className="font-mono font-semibold tabular-nums text-[#1F1F1F] dark:text-zinc-100">
-                {formatBytes(usedBytes)} ({itemCount} masters)
+            <div className="flex items-center justify-between gap-2">
+              <span>Storage Channel</span>
+              <span className="font-semibold text-[#1F1F1F] dark:text-zinc-100 truncate">
+                {channelTitle || 'Not connected'}
               </span>
             </div>
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between gap-2">
+              <span>Indexed Masters</span>
+              <span className="font-mono font-semibold tabular-nums text-[#1F1F1F] dark:text-zinc-100">
+                {formatBytes(usedBytes)} ({itemCount})
+              </span>
+            </div>
+            <div className="flex items-center justify-between gap-2">
               <span>Telegram Cloud Cost</span>
               <span className="font-mono font-semibold text-emerald-600 dark:text-emerald-400">
                 $0.00 / month
               </span>
             </div>
-            <div className="flex items-center justify-between">
-              <span>Single Uncompressed File Cap</span>
+            <div className="flex items-center justify-between gap-2">
+              <span>Single File Limit</span>
               <span className="font-mono font-semibold tabular-nums text-[#1F1F1F] dark:text-zinc-100">
                 2,048 MB (4,096 MB Premium)
               </span>
@@ -1011,7 +1455,7 @@ export function StorageQuotaModal({
           <div className="flex items-start gap-2.5 text-xs">
             <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5" />
             <p className="leading-relaxed">
-              Your private Telegram channel has no total storage ceiling. Framely indexes 400px WebP thumbnails locally in IndexedDB while keeping full bit-for-bit masters inside your Telegram channel.
+              Your private Telegram channel has no total storage ceiling. Framely caches thumbnails locally in IndexedDB while keeping full bit-for-bit masters inside your Telegram channel.
             </p>
           </div>
           <div className="flex justify-end">
