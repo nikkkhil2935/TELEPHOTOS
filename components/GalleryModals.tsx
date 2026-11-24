@@ -6,6 +6,8 @@ import {
   AlertTriangle,
   Check,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   Cloud,
   Download,
   ExternalLink,
@@ -22,6 +24,7 @@ import {
   Moon,
   QrCode,
   RefreshCw,
+  Settings2,
   ShieldAlert,
   ShieldCheck,
   Smartphone,
@@ -44,8 +47,10 @@ import { clearAllIndexedDb } from '@/lib/db';
 import { tgClient } from '@/lib/services/tgClient';
 import { formatBytes, sanitizeCaptionText } from '@/lib/utils/security';
 import {
+  combineCountryAndLocalPhone,
+  COMMON_COUNTRY_CODES,
+  resolveTelegramClientConfig,
   validateInternationalPhone,
-  validateTelegramCredentials,
 } from '@/lib/utils/telegram';
 
 /* -------------------------------------------------------------------------- */
@@ -149,7 +154,7 @@ export function UploadModal({
           {!isConnected && (
             <div className="rounded-xl border border-amber-200 dark:border-amber-900/60 bg-amber-50 dark:bg-amber-950/30 p-3.5 flex items-center justify-between gap-3">
               <p className="text-xs text-amber-800 dark:text-amber-200">
-                Sign in with your Telegram account to stream uncompressed masters into your private channel.
+                Sign in with your Telegram mobile number or QR to stream uncompressed masters into your private channel.
               </p>
               <button
                 type="button"
@@ -159,7 +164,7 @@ export function UploadModal({
                 }}
                 className="shrink-0 rounded-full bg-[#0B57D0] text-white px-3.5 py-1.5 text-xs font-semibold"
               >
-                Connect
+                Sign In
               </button>
             </div>
           )}
@@ -186,7 +191,7 @@ export function UploadModal({
               Drop photos, RAW masters, or 4K videos here
             </p>
             <p className="text-xs text-[#5F6368] dark:text-zinc-400 mt-1">
-              Uploaded with forceDocument: true · Up to 2,048 MB per file · EXIF preserved 100%
+              Uploaded uncompressed · Up to 2,048 MB per file · EXIF preserved 100%
             </p>
             <input
               ref={inputRef}
@@ -282,7 +287,7 @@ export function UploadModal({
           >
             <Upload className="w-3.5 h-3.5" />
             {!isConnected
-              ? 'Connect Telegram'
+              ? 'Sign In with Telegram'
               : uploading
                 ? 'Streaming to Telegram...'
                 : `Upload ${selectedFiles.length || ''} ${selectedFiles.length === 1 ? 'File' : 'Files'}`}
@@ -294,7 +299,7 @@ export function UploadModal({
 }
 
 /* -------------------------------------------------------------------------- */
-/* 2. Real Telegram MTProto Direct Auth Modal (Phone OTP + 2FA & Live QR)     */
+/* 2. Zero-Friction Telegram Auth Modal (Mobile Phone OTP + 2FA & Live QR)    */
 /* -------------------------------------------------------------------------- */
 interface TelegramAuthModalProps {
   open: boolean;
@@ -311,23 +316,24 @@ export function TelegramAuthModal({
   onSessionUpdated,
   onLoggedOut,
 }: TelegramAuthModalProps) {
-  const envApiId = process.env.NEXT_PUBLIC_TELEGRAM_API_ID || '';
-  const envApiHash = process.env.NEXT_PUBLIC_TELEGRAM_API_HASH || '';
-
   const [authTab, setAuthTab] = useState<'phone' | 'qr'>('phone');
-  const [apiId, setApiId] = useState(session?.apiId ? String(session.apiId) : envApiId);
-  const [apiHash, setApiHash] = useState(session?.apiHash || envApiHash);
-  const [showApiHash, setShowApiHash] = useState(false);
 
-  // Phone OTP + 2FA state
-  const [phone, setPhone] = useState(session?.phoneNumber || '');
+  // Mobile Phone OTP + 2FA state
+  const [countryCode, setCountryCode] = useState('+91');
+  const [localPhone, setLocalPhone] = useState(session?.phoneNumber || '');
+  const [resolvedPhone, setResolvedPhone] = useState('');
   const [phoneStep, setPhoneStep] = useState<'creds' | 'code' | '2fa'>('creds');
   const [phoneCodeHash, setPhoneCodeHash] = useState('');
   const [isCodeViaApp, setIsCodeViaApp] = useState(true);
   const [otpCode, setOtpCode] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
-  const [vaultPassphrase, setVaultPassphrase] = useState('');
+
+  // Optional collapsed Advanced custom API keys
+  const [showAdvancedApi, setShowAdvancedApi] = useState(false);
+  const [customApiId, setCustomApiId] = useState('');
+  const [customApiHash, setCustomApiHash] = useState('');
+  const [showApiHash, setShowApiHash] = useState(false);
 
   // Live QR state
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
@@ -339,18 +345,27 @@ export function TelegramAuthModal({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const resetTransientState = () => {
+    setError(null);
+    setLoading(false);
+    setQrDataUrl(null);
+    setQrExpiresIn(0);
+    setQrNeeds2fa(false);
+    setQrPassword('');
+    setPhoneStep('creds');
+    setOtpCode('');
+    setPassword('');
+  };
+
+  const handleCloseModal = () => {
+    void tgClient.cancelPendingAuth();
+    resetTransientState();
+    onClose();
+  };
+
   useEffect(() => {
     if (!open) {
       void tgClient.cancelPendingAuth();
-      setError(null);
-      setLoading(false);
-      setQrDataUrl(null);
-      setQrExpiresIn(0);
-      setQrNeeds2fa(false);
-      setQrPassword('');
-      setPhoneStep('creds');
-      setOtpCode('');
-      setPassword('');
     }
   }, [open]);
 
@@ -364,16 +379,20 @@ export function TelegramAuthModal({
 
   if (!open) return null;
 
+  const getActiveClientConfig = async () => {
+    return resolveTelegramClientConfig(
+      customApiId.trim() || customApiHash.trim()
+        ? { apiId: customApiId, apiHash: customApiHash }
+        : undefined
+    );
+  };
+
   const handleRequestOtp = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
 
-    const credCheck = validateTelegramCredentials(apiId, apiHash);
-    if (!credCheck.valid) {
-      setError(credCheck.error);
-      return;
-    }
-    const phoneCheck = validateInternationalPhone(phone);
+    const combined = combineCountryAndLocalPhone(countryCode, localPhone);
+    const phoneCheck = validateInternationalPhone(combined);
     if (!phoneCheck.valid) {
       setError(phoneCheck.error);
       return;
@@ -381,12 +400,9 @@ export function TelegramAuthModal({
 
     setLoading(true);
     try {
-      const res = await tgClient.sendPhoneCode(
-        credCheck.apiId,
-        credCheck.apiHash,
-        phoneCheck.phone
-      );
-      setPhone(phoneCheck.phone);
+      const cfg = await getActiveClientConfig();
+      const res = await tgClient.sendPhoneCode(cfg.apiId, cfg.apiHash, phoneCheck.phone);
+      setResolvedPhone(phoneCheck.phone);
       setPhoneCodeHash(res.phoneCodeHash);
       setIsCodeViaApp(res.isCodeViaApp);
       setPhoneStep('code');
@@ -401,11 +417,6 @@ export function TelegramAuthModal({
     e.preventDefault();
     setError(null);
 
-    const credCheck = validateTelegramCredentials(apiId, apiHash);
-    if (!credCheck.valid) {
-      setError(credCheck.error);
-      return;
-    }
     if (!otpCode.trim()) {
       setError('Enter the verification code sent to your Telegram app or SMS.');
       return;
@@ -417,14 +428,14 @@ export function TelegramAuthModal({
 
     setLoading(true);
     try {
+      const cfg = await getActiveClientConfig();
       const nextSession = await tgClient.verifyPhoneCodeAndSignIn({
-        apiId: credCheck.apiId,
-        apiHash: credCheck.apiHash,
-        phoneNumber: phone.trim(),
+        apiId: cfg.apiId,
+        apiHash: cfg.apiHash,
+        phoneNumber: resolvedPhone,
         phoneCode: otpCode.trim(),
         phoneCodeHash,
         password: password.trim() || undefined,
-        vaultPassphrase: vaultPassphrase.trim().length >= 6 ? vaultPassphrase.trim() : undefined,
       });
       onSessionUpdated(nextSession);
     } catch (err) {
@@ -442,22 +453,16 @@ export function TelegramAuthModal({
 
   const handleStartQr = async () => {
     setError(null);
-    const credCheck = validateTelegramCredentials(apiId, apiHash);
-    if (!credCheck.valid) {
-      setError(credCheck.error);
-      return;
-    }
-
     setLoading(true);
     setQrDataUrl(null);
     setQrNeeds2fa(false);
     setQrPassword('');
 
     try {
+      const cfg = await getActiveClientConfig();
       const nextSession = await tgClient.startQrLogin({
-        apiId: credCheck.apiId,
-        apiHash: credCheck.apiHash,
-        vaultPassphrase: vaultPassphrase.trim().length >= 6 ? vaultPassphrase.trim() : undefined,
+        apiId: cfg.apiId,
+        apiHash: cfg.apiHash,
         onQrToken: async (qrUrl, expires) => {
           try {
             const url = await QRCode.toDataURL(qrUrl, {
@@ -515,22 +520,22 @@ export function TelegramAuthModal({
     <div
       role="dialog"
       aria-modal="true"
-      aria-label="Connect Telegram MTProto Vault"
+      aria-label="Sign In with Telegram"
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 backdrop-blur-xs p-3 sm:p-4"
     >
       <div className="w-full max-w-lg max-h-[92dvh] flex flex-col rounded-2xl border border-slate-200 dark:border-zinc-800 bg-white dark:bg-[#1E1F20] shadow-2xl overflow-hidden">
         <div className="flex items-center justify-between px-5 sm:px-6 py-4 border-b border-slate-200 dark:border-zinc-800 shrink-0">
           <div className="min-w-0 pr-2">
             <h2 className="text-base font-bold text-[#1F1F1F] dark:text-zinc-100 truncate">
-              {session ? 'Telegram MTProto Account' : 'Sign In with Telegram'}
+              {session ? 'Telegram Account' : 'Sign In with Telegram'}
             </h2>
             <p className="text-xs text-[#5F6368] dark:text-zinc-400 truncate">
-              Direct browser-to-Telegram MTProto 2.0 WSS · Zero relay servers
+              Login with mobile OTP or QR code · Direct MTProto 2.0 WSS
             </p>
           </div>
           <button
             type="button"
-            onClick={onClose}
+            onClick={handleCloseModal}
             aria-label="Close Telegram sign in modal"
             className="w-8 h-8 rounded-full flex items-center justify-center text-slate-500 hover:bg-slate-100 dark:hover:bg-zinc-800 shrink-0"
           >
@@ -562,69 +567,6 @@ export function TelegramAuthModal({
             </div>
           )}
 
-          {/* Shared API Credentials Box */}
-          <div className="space-y-3 rounded-2xl border border-slate-200 dark:border-zinc-800 bg-[#F8FAFD] dark:bg-zinc-900/60 p-4">
-            <div className="flex items-center justify-between gap-2">
-              <span className="text-xs font-semibold text-[#1F1F1F] dark:text-zinc-100">
-                Telegram API Credentials
-              </span>
-              <a
-                href="https://my.telegram.org/apps"
-                target="_blank"
-                rel="noreferrer noopener"
-                className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#0B57D0] dark:text-[#A8C7FA] hover:underline"
-              >
-                Get keys at my.telegram.org
-                <ExternalLink className="w-3 h-3" />
-              </a>
-            </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <div>
-                <label htmlFor="tg-api-id" className="block text-[11px] font-semibold text-slate-600 dark:text-zinc-400 mb-1">
-                  API ID
-                </label>
-                <input
-                  id="tg-api-id"
-                  type="text"
-                  inputMode="numeric"
-                  value={apiId}
-                  onChange={(e) => {
-                    setApiId(e.target.value);
-                    setError(null);
-                  }}
-                  placeholder="e.g. 24910221"
-                  className="w-full rounded-xl border border-slate-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-3 py-2 text-base sm:text-xs font-mono text-[#1F1F1F] dark:text-zinc-100"
-                />
-              </div>
-              <div>
-                <label htmlFor="tg-api-hash" className="block text-[11px] font-semibold text-slate-600 dark:text-zinc-400 mb-1">
-                  API Hash (32 hex)
-                </label>
-                <div className="relative">
-                  <input
-                    id="tg-api-hash"
-                    type={showApiHash ? 'text' : 'password'}
-                    value={apiHash}
-                    onChange={(e) => {
-                      setApiHash(e.target.value);
-                      setError(null);
-                    }}
-                    placeholder="32-char hex hash"
-                    className="w-full rounded-xl border border-slate-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-3 py-2 pr-8 text-base sm:text-xs font-mono text-[#1F1F1F] dark:text-zinc-100"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowApiHash((v) => !v)}
-                    aria-label={showApiHash ? 'Hide API Hash' : 'Show API Hash'}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-slate-500"
-                  >
-                    {showApiHash ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-
           {/* Auth Method Switcher */}
           <div className="flex gap-1 p-1 rounded-xl bg-[#F8FAFD] dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800">
             <button
@@ -642,7 +584,7 @@ export function TelegramAuthModal({
               }`}
             >
               <Smartphone className="w-3.5 h-3.5" />
-              Phone OTP
+              Mobile Phone OTP
             </button>
             <button
               type="button"
@@ -704,8 +646,11 @@ export function TelegramAuthModal({
                 </>
               ) : (
                 <div className="space-y-3 py-3">
-                  <p className="text-xs text-[#5F6368] dark:text-zinc-400 max-w-xs mx-auto">
-                    Enter your API ID & API Hash above, then generate a real rotating Telegram login QR token directly over MTProto WSS.
+                  <div className="w-12 h-12 mx-auto rounded-2xl bg-[#D3E3FD]/70 dark:bg-[#004A77]/60 text-[#0B57D0] dark:text-[#A8C7FA] flex items-center justify-center">
+                    <QrCode className="w-6 h-6" />
+                  </div>
+                  <p className="text-xs text-[#5F6368] dark:text-zinc-400 max-w-xs mx-auto leading-relaxed">
+                    Tap below to generate a real rotating Telegram login QR code straight over MTProto WebSockets.
                   </p>
                   <button
                     type="button"
@@ -745,41 +690,44 @@ export function TelegramAuthModal({
           ) : phoneStep === 'creds' ? (
             <form onSubmit={handleRequestOtp} className="space-y-3.5">
               <div>
-                <label htmlFor="tg-phone" className="block text-xs font-semibold text-slate-700 dark:text-zinc-300 mb-1">
-                  Phone Number (International Format)
+                <label htmlFor="tg-phone" className="block text-xs font-semibold text-slate-700 dark:text-zinc-300 mb-1.5">
+                  Mobile Phone Number
                 </label>
-                <input
-                  id="tg-phone"
-                  type="tel"
-                  autoComplete="tel"
-                  value={phone}
-                  onChange={(e) => {
-                    setPhone(e.target.value);
-                    setError(null);
-                  }}
-                  placeholder="+1 415 555 0199"
-                  className="w-full rounded-xl border border-slate-300 dark:border-zinc-700 bg-[#F8FAFD] dark:bg-zinc-900 px-3.5 py-2.5 text-base sm:text-xs font-mono text-[#1F1F1F] dark:text-zinc-100"
-                />
-              </div>
-
-              <div>
-                <label htmlFor="tg-vault-pass" className="block text-xs font-semibold text-slate-700 dark:text-zinc-300 mb-1">
-                  Encrypt Session with AES-256-GCM Passphrase (optional)
-                </label>
-                <input
-                  id="tg-vault-pass"
-                  type="password"
-                  value={vaultPassphrase}
-                  onChange={(e) => setVaultPassphrase(e.target.value)}
-                  placeholder="Min 6 chars (leave empty for instant unlock)"
-                  className="w-full rounded-xl border border-slate-300 dark:border-zinc-700 bg-[#F8FAFD] dark:bg-zinc-900 px-3.5 py-2.5 text-base sm:text-xs text-[#1F1F1F] dark:text-zinc-100"
-                />
+                <div className="flex gap-2">
+                  <select
+                    aria-label="Country code"
+                    value={countryCode}
+                    onChange={(e) => setCountryCode(e.target.value)}
+                    className="w-28 sm:w-36 shrink-0 rounded-xl border border-slate-300 dark:border-zinc-700 bg-[#F8FAFD] dark:bg-zinc-900 px-2.5 py-2.5 text-base sm:text-xs font-medium text-[#1F1F1F] dark:text-zinc-100"
+                  >
+                    {COMMON_COUNTRY_CODES.map((c) => (
+                      <option key={c.code} value={c.code}>
+                        {c.label}
+                      </option>
+                    ))}
+                  </select>
+                  <input
+                    id="tg-phone"
+                    type="tel"
+                    autoComplete="tel-national"
+                    value={localPhone}
+                    onChange={(e) => {
+                      setLocalPhone(e.target.value);
+                      setError(null);
+                    }}
+                    placeholder="98200 12345"
+                    className="flex-1 min-w-0 rounded-xl border border-slate-300 dark:border-zinc-700 bg-[#F8FAFD] dark:bg-zinc-900 px-3.5 py-2.5 text-base sm:text-sm font-mono text-[#1F1F1F] dark:text-zinc-100"
+                  />
+                </div>
+                <p className="text-[11px] text-[#5F6368] dark:text-zinc-400 mt-1.5">
+                  No developer secrets required. Telegram sends a 5-digit OTP directly to your phone.
+                </p>
               </div>
 
               <div className="flex items-center justify-end gap-2 pt-1">
                 <button
                   type="button"
-                  onClick={onClose}
+                  onClick={handleCloseModal}
                   className="rounded-full px-4 py-2 text-xs font-semibold text-slate-600 dark:text-zinc-300 hover:bg-slate-100 dark:hover:bg-zinc-800"
                 >
                   Cancel
@@ -787,7 +735,7 @@ export function TelegramAuthModal({
                 <button
                   type="submit"
                   disabled={loading}
-                  className="inline-flex items-center gap-1.5 rounded-full bg-[#0B57D0] hover:bg-[#0842A0] disabled:opacity-50 px-5 py-2 text-xs font-semibold text-white transition-colors"
+                  className="inline-flex items-center gap-1.5 rounded-full bg-[#0B57D0] hover:bg-[#0842A0] disabled:opacity-50 px-5 py-2.5 text-xs font-semibold text-white transition-colors"
                 >
                   {loading ? (
                     <>
@@ -806,13 +754,13 @@ export function TelegramAuthModal({
           ) : (
             <form onSubmit={handleVerifyOtp} className="space-y-3.5">
               <div className="rounded-xl bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-900/60 px-3.5 py-2.5 text-xs text-[#0B57D0] dark:text-[#A8C7FA]">
-                Login code sent to <strong className="font-mono">{phone}</strong>{' '}
+                Login code sent to <strong className="font-mono">{resolvedPhone}</strong>{' '}
                 {isCodeViaApp ? 'in your Telegram app.' : 'via SMS.'}
               </div>
 
               <div>
                 <label htmlFor="tg-otp-code" className="block text-xs font-semibold text-slate-700 dark:text-zinc-300 mb-1">
-                  Verification Code
+                  5-Digit Verification Code
                 </label>
                 <input
                   id="tg-otp-code"
@@ -875,7 +823,7 @@ export function TelegramAuthModal({
                 <button
                   type="submit"
                   disabled={loading}
-                  className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-full bg-[#0B57D0] hover:bg-[#0842A0] disabled:opacity-50 px-5 py-2 text-xs font-semibold text-white transition-colors"
+                  className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-full bg-[#0B57D0] hover:bg-[#0842A0] disabled:opacity-50 px-5 py-2.5 text-xs font-semibold text-white transition-colors"
                 >
                   {loading ? (
                     <>
@@ -898,6 +846,70 @@ export function TelegramAuthModal({
               {error}
             </div>
           )}
+
+          {/* Optional Collapsed Advanced Custom API Keys */}
+          <div className="pt-2 border-t border-slate-200 dark:border-zinc-800">
+            <button
+              type="button"
+              onClick={() => setShowAdvancedApi((v) => !v)}
+              className="w-full flex items-center justify-between text-[11px] font-medium text-[#5F6368] dark:text-zinc-400 hover:text-[#1F1F1F] dark:hover:text-zinc-200 py-1"
+            >
+              <span className="inline-flex items-center gap-1.5">
+                <Settings2 className="w-3.5 h-3.5" />
+                Advanced: Custom my.telegram.org API keys (optional)
+              </span>
+              {showAdvancedApi ? (
+                <ChevronUp className="w-3.5 h-3.5" />
+              ) : (
+                <ChevronDown className="w-3.5 h-3.5" />
+              )}
+            </button>
+            {showAdvancedApi && (
+              <div className="mt-2 rounded-xl border border-slate-200 dark:border-zinc-800 bg-[#F8FAFD] dark:bg-zinc-900/60 p-3 space-y-2.5">
+                <div className="flex items-center justify-between text-[11px] text-[#5F6368] dark:text-zinc-400">
+                  <span>Optional override for power users.</span>
+                  <a
+                    href="https://my.telegram.org/apps"
+                    target="_blank"
+                    rel="noreferrer noopener"
+                    className="inline-flex items-center gap-1 text-[#0B57D0] dark:text-[#A8C7FA] font-semibold hover:underline"
+                  >
+                    my.telegram.org
+                    <ExternalLink className="w-3 h-3" />
+                  </a>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  <input
+                    id="tg-api-id"
+                    type="text"
+                    inputMode="numeric"
+                    value={customApiId}
+                    onChange={(e) => setCustomApiId(e.target.value)}
+                    placeholder="API ID (optional)"
+                    className="w-full rounded-lg border border-slate-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-3 py-2 text-base sm:text-xs font-mono text-[#1F1F1F] dark:text-zinc-100"
+                  />
+                  <div className="relative">
+                    <input
+                      id="tg-api-hash"
+                      type={showApiHash ? 'text' : 'password'}
+                      value={customApiHash}
+                      onChange={(e) => setCustomApiHash(e.target.value)}
+                      placeholder="32-char API Hash"
+                      className="w-full rounded-lg border border-slate-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-3 py-2 pr-8 text-base sm:text-xs font-mono text-[#1F1F1F] dark:text-zinc-100"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowApiHash((v) => !v)}
+                      aria-label={showApiHash ? 'Hide API Hash' : 'Show API Hash'}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-slate-500"
+                    >
+                      {showApiHash ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       </div>
     </div>

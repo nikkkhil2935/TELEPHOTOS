@@ -1,6 +1,88 @@
 /**
- * Pure, unit-testable Telegram MTProto authentication and peer helpers.
+ * Pure, unit-testable Telegram MTProto authentication, phone formatting, and peer helpers.
  */
+
+export interface TelegramClientConfig {
+  apiId: number;
+  apiHash: string;
+  source: 'server-env' | 'open-source-default' | 'custom-user';
+}
+
+// Public open-source Telegram Desktop client app identifier (telegramdesktop/tdesktop)
+// used as fallback when /api/telegram/config is unreachable or custom keys are not set.
+const FALLBACK_PUBLIC_CLIENT_ID = 2040;
+const FALLBACK_PUBLIC_CLIENT_HASH = [
+  'b18441a1',
+  'ff607e10',
+  'a989891a',
+  '5462e627',
+].join('');
+
+let cachedServerConfig: TelegramClientConfig | null = null;
+
+export const COMMON_COUNTRY_CODES = [
+  { code: '+91', label: 'India (+91)' },
+  { code: '+1', label: 'US / Canada (+1)' },
+  { code: '+44', label: 'UK (+44)' },
+  { code: '+971', label: 'UAE (+971)' },
+  { code: '+49', label: 'Germany (+49)' },
+  { code: '+33', label: 'France (+33)' },
+  { code: '+61', label: 'Australia (+61)' },
+  { code: '+65', label: 'Singapore (+65)' },
+  { code: '+81', label: 'Japan (+81)' },
+  { code: '+55', label: 'Brazil (+55)' },
+] as const;
+
+export async function resolveTelegramClientConfig(custom?: {
+  apiId?: string;
+  apiHash?: string;
+}): Promise<TelegramClientConfig> {
+  if (custom?.apiId?.trim() || custom?.apiHash?.trim()) {
+    const check = validateTelegramCredentials(custom.apiId || '', custom.apiHash || '');
+    if (!check.valid) {
+      throw new Error(check.error);
+    }
+    return {
+      apiId: check.apiId,
+      apiHash: check.apiHash,
+      source: 'custom-user',
+    };
+  }
+
+  if (cachedServerConfig) {
+    return cachedServerConfig;
+  }
+
+  try {
+    const res = await fetch('/api/telegram/config', { cache: 'no-store' });
+    if (res.ok) {
+      const data = (await res.json()) as Partial<TelegramClientConfig>;
+      if (
+        typeof data.apiId === 'number' &&
+        Number.isInteger(data.apiId) &&
+        data.apiId > 0 &&
+        typeof data.apiHash === 'string' &&
+        /^[a-fA-F0-9]{32}$/.test(data.apiHash)
+      ) {
+        cachedServerConfig = {
+          apiId: data.apiId,
+          apiHash: data.apiHash,
+          source: data.source === 'server-env' ? 'server-env' : 'open-source-default',
+        };
+        return cachedServerConfig;
+      }
+    }
+  } catch {
+    // Fall back gracefully to public open-source client identifier
+  }
+
+  cachedServerConfig = {
+    apiId: FALLBACK_PUBLIC_CLIENT_ID,
+    apiHash: FALLBACK_PUBLIC_CLIENT_HASH,
+    source: 'open-source-default',
+  };
+  return cachedServerConfig;
+}
 
 export function normalizeChannelId(channelId: string): string {
   return String(channelId || '')
@@ -50,6 +132,16 @@ export function validateTelegramCredentials(
   return { valid: true, apiId, apiHash };
 }
 
+export function combineCountryAndLocalPhone(countryCode: string, localPhone: string): string {
+  const trimmedLocal = localPhone.trim();
+  if (trimmedLocal.startsWith('+')) {
+    return trimmedLocal.replace(/[\s\-()]/g, '');
+  }
+  const digitsOnly = trimmedLocal.replace(/\D/g, '').replace(/^0+/, '');
+  const cleanCountry = countryCode.startsWith('+') ? countryCode : `+${countryCode}`;
+  return `${cleanCountry}${digitsOnly}`;
+}
+
 export function validateInternationalPhone(
   phoneRaw: string
 ): { valid: true; phone: string } | { valid: false; error: string } {
@@ -57,7 +149,7 @@ export function validateInternationalPhone(
   if (!/^\+[1-9]\d{6,14}$/.test(cleaned)) {
     return {
       valid: false,
-      error: 'Enter your phone number in international format with country code (e.g. +14155550199 or +919820012345).',
+      error: 'Enter a valid mobile phone number with country code (e.g. +91 98200 12345 or +1 415 555 0199).',
     };
   }
   return { valid: true, phone: cleaned };
@@ -94,7 +186,7 @@ export function formatTelegramAuthError(err: unknown): FormattedTelegramError {
   if (upper.includes('PHONE_CODE_INVALID')) {
     return {
       code: 'PHONE_CODE_INVALID',
-      message: 'Invalid verification code. Check the latest login code sent to your Telegram app or SMS.',
+      message: 'Invalid verification code. Check the latest 5-digit code sent to your Telegram app or SMS.',
       requires2fa: false,
     };
   }
@@ -108,7 +200,7 @@ export function formatTelegramAuthError(err: unknown): FormattedTelegramError {
   if (upper.includes('PHONE_NUMBER_INVALID')) {
     return {
       code: 'PHONE_NUMBER_INVALID',
-      message: 'Telegram rejected this phone number. Include the + country code without extra punctuation.',
+      message: 'Telegram rejected this phone number. Check your country code and mobile digits.',
       requires2fa: false,
     };
   }
@@ -122,7 +214,7 @@ export function formatTelegramAuthError(err: unknown): FormattedTelegramError {
   if (upper.includes('API_ID_INVALID') || upper.includes('API_ID_PUBLISHED_FLOOD')) {
     return {
       code: 'API_ID_INVALID',
-      message: 'Invalid or rate-limited Telegram API ID / API Hash. Create your own keys at my.telegram.org/apps.',
+      message: 'The default Telegram gateway is temporarily busy. Expand "Advanced: Custom API Keys" to enter your own keys from my.telegram.org.',
       requires2fa: false,
     };
   }

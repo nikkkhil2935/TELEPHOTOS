@@ -311,4 +311,72 @@ test('Floating Date Scrubber Rail extracts descending years and months with exac
   );
 });
 
+test('Telegram utilities normalize channel IDs, format QR base64url tokens, combine/validate phones, and map RPC errors', async () => {
+  const {
+    buildTelegramQrUrl,
+    combineCountryAndLocalPhone,
+    formatTelegramAuthError,
+    normalizeChannelId,
+    validateInternationalPhone,
+    validateTelegramCredentials,
+  } = await import('./utils/telegram');
+
+  assert.equal(normalizeChannelId('-1002198472310'), '2198472310');
+  assert.equal(normalizeChannelId('+12345'), '12345');
+
+  const qrUrl = buildTelegramQrUrl(new Uint8Array([0xfb, 0xff, 0xfe, 0x01]));
+  assert.ok(qrUrl.startsWith('tg://login?token='));
+  const tokenPart = qrUrl.slice('tg://login?token='.length);
+  assert.equal(tokenPart.includes('+'), false);
+  assert.equal(tokenPart.includes('/'), false);
+  assert.equal(tokenPart.includes('='), false);
+
+  assert.equal(combineCountryAndLocalPhone('+91', '098200 12345'), '+919820012345');
+  assert.equal(combineCountryAndLocalPhone('+91', '+1 415-555-0199'), '+14155550199');
+  assert.equal(validateInternationalPhone('+919820012345').valid, true);
+  assert.equal(validateInternationalPhone('123').valid, false);
+
+  assert.equal(
+    validateTelegramCredentials('2040', 'b18441a1ff607e10a989891a5462e627').valid,
+    true
+  );
+  assert.equal(validateTelegramCredentials('abc', 'short').valid, false);
+
+  const twoFa = formatTelegramAuthError({ errorMessage: 'SESSION_PASSWORD_NEEDED' });
+  assert.equal(twoFa.requires2fa, true);
+  assert.equal(twoFa.code, 'SESSION_PASSWORD_NEEDED');
+
+  const flood = formatTelegramAuthError({ errorMessage: 'FLOOD_WAIT_42' });
+  assert.equal(flood.code, 'FLOOD_WAIT');
+  assert.ok(flood.message.includes('42'));
+});
+
+test('Browser shims for GramJS (os, util, crypto) work cleanly without Node native dependencies', async () => {
+  const { createRequire } = await import('node:module');
+  const require = createRequire(import.meta.url);
+  const osShim = require('./shims/os.js');
+  const utilShim = require('./shims/util.js');
+  const cryptoShim = require('./shims/crypto.js');
+
+  assert.equal(typeof osShim.type(), 'string');
+  assert.equal(typeof osShim.release(), 'string');
+  assert.equal(typeof utilShim.inspect({ ok: true }), 'string');
+
+  const rand = cryptoShim.randomBytes(16);
+  assert.equal(rand.length, 16);
+
+  const sha256Buf = await cryptoShim.createHash('sha256').update('framely').digest();
+  assert.equal(sha256Buf.length, 32);
+
+  const derived = await cryptoShim.pbkdf2Sync(
+    Buffer.from('password'),
+    Buffer.from('salt1234'),
+    1000,
+    32,
+    'sha512'
+  );
+  assert.equal(derived.length, 32);
+});
+
+
 

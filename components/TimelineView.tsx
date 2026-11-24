@@ -564,9 +564,36 @@ export function TimelineView({
           </button>
         </div>
       ) : (
-        <div className="relative flex items-start gap-4 lg:gap-6">
-          {/* Primary Day-Grouped Media Timeline */}
-          <div className="flex-1 min-w-0 space-y-8">
+        <div className="space-y-4">
+          {/* Mobile Compact Year Jump Bar (< 768px) */}
+          {yearNodes.length > 1 && (
+            <div
+              aria-label="Mobile date jump"
+              className="md:hidden flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-1"
+            >
+              {yearNodes.map((yearNode) => {
+                const isYearActive = effectiveActiveYear === yearNode.year;
+                return (
+                  <button
+                    key={yearNode.year}
+                    type="button"
+                    onClick={() => jumpToYear(yearNode)}
+                    className={`shrink-0 px-3 py-1 rounded-full text-xs font-mono font-semibold tabular-nums transition-colors ${
+                      isYearActive
+                        ? 'bg-[#0B57D0] text-white'
+                        : 'bg-[#F8FAFD] dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800 text-[#444746] dark:text-zinc-300'
+                    }`}
+                  >
+                    {yearNode.year}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
+          <div className="relative flex items-start gap-4 lg:gap-6">
+            {/* Primary Day-Grouped Media Timeline */}
+            <div className="flex-1 min-w-0 space-y-8">
             {dayGroups.map((group) => {
               const allGroupSelected = group.items.every((i) => selectedIds.has(i.messageId));
               const monthKey = group.dateKey.slice(0, 7);
@@ -805,6 +832,7 @@ export function TimelineView({
               </div>
             </aside>
           )}
+          </div>
         </div>
       )}
     </div>

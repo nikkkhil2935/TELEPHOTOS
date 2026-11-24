@@ -11,17 +11,18 @@ import {
   Download,
   Heart,
   Info,
+  Loader2,
   Lock,
   MapPin,
   Maximize2,
   Minimize2,
-  Play,
   ShieldCheck,
   Trash2,
   Unlock,
   X,
 } from 'lucide-react';
 import type { MediaItem } from '@/lib/types';
+import { tgClient } from '@/lib/services/tgClient';
 import {
   formatBytes,
   formatDuration,
@@ -57,13 +58,49 @@ export function MediaViewer({
   );
   const current = items[activeIndex];
 
-  // Default to open on desktop (>= 1024px) and CLOSED on mobile so photos are never squashed
+  // Default to open on desktop (>= 1024px) and CLOSED on mobile so media fills the screen
   const [infoOpen, setInfoOpen] = useState(() =>
     typeof window !== 'undefined' ? window.innerWidth >= 1024 : false
   );
   const [zoomed, setZoomed] = useState(false);
   const [copiedSha, setCopiedSha] = useState(false);
+  const [hydratedUrls, setHydratedUrls] = useState<Record<number, string>>({});
+  const [loadingMasterPct, setLoadingMasterPct] = useState<number | null>(null);
   const activeThumbRef = useRef<HTMLButtonElement | null>(null);
+  const touchStartXRef = useRef<number | null>(null);
+
+  const currentId = current?.messageId ?? null;
+  const currentFullUrl = current?.fullUrl;
+  const cachedBlobUrl = currentId !== null ? tgClient.getCachedFullUrl(currentId) : undefined;
+
+  // Auto-hydrate full-resolution master or video stream via MTProto 4-worker chunk download
+  useEffect(() => {
+    if (!current || currentId === null) return;
+    if (currentFullUrl && currentFullUrl.startsWith('blob:')) return;
+    if (tgClient.getCachedFullUrl(currentId)) return;
+    if (!tgClient.getSession()) return;
+
+    let cancelled = false;
+    tgClient
+      .downloadMediaChunked(current, (pct) => {
+        if (!cancelled) setLoadingMasterPct(pct);
+      })
+      .then((url) => {
+        if (!cancelled && url) {
+          setHydratedUrls((prev) => ({ ...prev, [currentId]: url }));
+        }
+      })
+      .catch(() => {
+        // Keep displaying cached thumbnail gracefully
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingMasterPct(null);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [current, currentId, currentFullUrl]);
 
   const goPrev = useCallback(() => {
     if (activeIndex > 0) {
@@ -91,7 +128,7 @@ export function MediaViewer({
       } else if (e.key === 'ArrowRight') {
         e.preventDefault();
         goNext();
-      } else if (e.key === ' ') {
+      } else if (e.key === ' ' && current.kind !== 'video') {
         e.preventDefault();
         setZoomed((z) => !z);
       } else if (e.key === 'f' || e.key === 'F') {
@@ -121,6 +158,9 @@ export function MediaViewer({
   }, [activeMessageId]);
 
   if (!current) return null;
+
+  const resolvedSrc =
+    hydratedUrls[current.messageId] || cachedBlobUrl || current.fullUrl || current.thumbnailDataUrl;
 
   // 0ms Camera Roll Filmstrip: windowed rendering (active ± 18 items)
   const { start, end } = getWindowedFilmstripIndices(items.length, activeIndex, 18);
@@ -159,8 +199,8 @@ export function MediaViewer({
       className="fixed inset-0 z-50 flex flex-col bg-black/[0.96] text-white select-none"
     >
       {/* Top Cinema Control Bar */}
-      <header className="h-14 shrink-0 px-3 sm:px-5 flex items-center justify-between gap-4 border-b border-white/10 bg-black/50 backdrop-blur-md">
-        <div className="flex items-center gap-2.5 min-w-0">
+      <header className="h-14 shrink-0 px-3 sm:px-5 flex items-center justify-between gap-3 border-b border-white/10 bg-black/50 backdrop-blur-md">
+        <div className="flex items-center gap-2 min-w-0">
           <button
             type="button"
             onClick={onClose}
@@ -178,15 +218,17 @@ export function MediaViewer({
         </div>
 
         <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
-          <button
-            type="button"
-            onClick={() => setZoomed((z) => !z)}
-            aria-label={zoomed ? 'Reset zoom' : 'Zoom image'}
-            title="Toggle Zoom (Space)"
-            className="hidden sm:flex w-9 h-9 rounded-full items-center justify-center text-white/80 hover:bg-white/10 transition-colors"
-          >
-            {zoomed ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
-          </button>
+          {current.kind !== 'video' && (
+            <button
+              type="button"
+              onClick={() => setZoomed((z) => !z)}
+              aria-label={zoomed ? 'Reset zoom' : 'Zoom image'}
+              title="Toggle Zoom (Space)"
+              className="hidden sm:flex w-9 h-9 rounded-full items-center justify-center text-white/80 hover:bg-white/10 transition-colors"
+            >
+              {zoomed ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
+            </button>
+          )}
           <button
             type="button"
             onClick={() => onToggleFavorite(current)}
@@ -253,34 +295,67 @@ export function MediaViewer({
 
       {/* Main Darkroom Stage + Responsive EXIF Studio */}
       <div className="flex-1 min-h-0 flex relative overflow-hidden">
-        {/* Cinema Viewport */}
-        <div className="flex-1 min-w-0 flex flex-col relative">
+        {/* Cinema Viewport with Touch Swipe Navigation */}
+        <div
+          className="flex-1 min-w-0 flex flex-col relative"
+          onTouchStart={(e) => {
+            touchStartXRef.current = e.touches[0]?.clientX ?? null;
+          }}
+          onTouchEnd={(e) => {
+            if (touchStartXRef.current === null || zoomed) return;
+            const endX = e.changedTouches[0]?.clientX ?? touchStartXRef.current;
+            const delta = endX - touchStartXRef.current;
+            touchStartXRef.current = null;
+            if (delta > 60) goPrev();
+            else if (delta < -60) goNext();
+          }}
+        >
           <div className="flex-1 min-h-0 relative flex items-center justify-center p-3 sm:p-8 overflow-hidden">
             {activeIndex > 0 && (
               <button
                 type="button"
                 onClick={goPrev}
                 aria-label="Previous photo"
-                className="absolute left-3 sm:left-5 z-20 w-11 h-11 rounded-full bg-black/60 hover:bg-black/85 border border-white/15 flex items-center justify-center text-white transition-colors"
+                className="absolute left-3 sm:left-5 z-20 w-10 h-10 sm:w-11 sm:h-11 rounded-full bg-black/60 hover:bg-black/85 border border-white/15 flex items-center justify-center text-white transition-colors"
               >
                 <ChevronLeft className="w-6 h-6" />
               </button>
             )}
 
             <div className="relative max-w-full max-h-full flex items-center justify-center">
-              <img
-                src={current.fullUrl || current.thumbnailDataUrl}
-                alt={current.filename}
-                referrerPolicy="no-referrer"
-                onClick={() => setZoomed((z) => !z)}
-                className={`max-h-[calc(100vh-195px)] max-w-full object-contain rounded-lg cursor-zoom-in transition-transform duration-200 ${
-                  zoomed ? 'scale-150 cursor-zoom-out' : 'scale-100'
-                }`}
-              />
-              {current.kind === 'video' && (
+              {current.kind === 'video' && resolvedSrc && !resolvedSrc.startsWith('data:image') ? (
+                <video
+                  key={current.messageId}
+                  src={resolvedSrc}
+                  poster={current.thumbnailDataUrl}
+                  controls
+                  playsInline
+                  className="max-h-[calc(100vh-195px)] max-w-full rounded-lg bg-black"
+                />
+              ) : (
+                <img
+                  src={resolvedSrc}
+                  alt={current.filename}
+                  referrerPolicy="no-referrer"
+                  onClick={() => setZoomed((z) => !z)}
+                  className={`max-h-[calc(100vh-195px)] max-w-full object-contain rounded-lg cursor-zoom-in transition-transform duration-200 ${
+                    zoomed ? 'scale-150 cursor-zoom-out' : 'scale-100'
+                  }`}
+                />
+              )}
+
+              {loadingMasterPct !== null && (
+                <div className="absolute bottom-4 left-1/2 -translate-x-1/2 inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-black/80 border border-white/15 text-xs font-mono tabular-nums text-white backdrop-blur-md">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin text-[#A8C7FA]" />
+                  <span>
+                    Streaming {current.kind === 'video' ? 'video' : 'original master'} · {loadingMasterPct}%
+                  </span>
+                </div>
+              )}
+
+              {loadingMasterPct === null && current.kind === 'video' && resolvedSrc.startsWith('data:image') && (
                 <div className="absolute bottom-4 left-1/2 -translate-x-1/2 inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-black/75 border border-white/15 text-xs font-mono tabular-nums text-white">
-                  <Play className="w-3.5 h-3.5 fill-current text-[#A8C7FA]" />
-                  <span>4K60 Uncompressed Master · {formatDuration(current.durationMs)}</span>
+                  <span>Video Master · {formatDuration(current.durationMs)}</span>
                 </div>
               )}
             </div>
@@ -290,7 +365,7 @@ export function MediaViewer({
                 type="button"
                 onClick={goNext}
                 aria-label="Next photo"
-                className="absolute right-3 sm:right-5 z-20 w-11 h-11 rounded-full bg-black/60 hover:bg-black/85 border border-white/15 flex items-center justify-center text-white transition-colors"
+                className="absolute right-3 sm:right-5 z-20 w-10 h-10 sm:w-11 sm:h-11 rounded-full bg-black/60 hover:bg-black/85 border border-white/15 flex items-center justify-center text-white transition-colors"
               >
                 <ChevronRight className="w-6 h-6" />
               </button>
@@ -347,6 +422,8 @@ export function MediaViewer({
               formattedDate={formattedDate}
               copiedSha={copiedSha}
               onCopySha={handleCopySha}
+              onToggleArchive={() => onToggleArchive(current)}
+              onToggleLock={() => onToggleLock(current)}
               onClose={() => setInfoOpen(false)}
             />
           </aside>
@@ -354,7 +431,7 @@ export function MediaViewer({
 
         {/* Mobile Slide-Up Bottom Sheet Drawer (< 1024px) */}
         {infoOpen && (
-          <div className="lg:hidden fixed inset-x-0 bottom-0 z-40 max-h-[76vh] rounded-t-3xl border-t border-white/15 bg-[#121316] text-zinc-100 shadow-2xl flex flex-col">
+          <div className="lg:hidden fixed inset-x-0 bottom-0 z-40 max-h-[78vh] rounded-t-3xl border-t border-white/15 bg-[#121316] text-zinc-100 shadow-2xl flex flex-col">
             <div className="pt-3 pb-1 flex justify-center shrink-0">
               <button
                 type="button"
@@ -370,6 +447,8 @@ export function MediaViewer({
                 formattedDate={formattedDate}
                 copiedSha={copiedSha}
                 onCopySha={handleCopySha}
+                onToggleArchive={() => onToggleArchive(current)}
+                onToggleLock={() => onToggleLock(current)}
                 onClose={() => setInfoOpen(false)}
               />
             </div>
@@ -386,6 +465,8 @@ interface ExifStudioContentProps {
   formattedDate: string;
   copiedSha: boolean;
   onCopySha: () => void;
+  onToggleArchive: () => void;
+  onToggleLock: () => void;
   onClose: () => void;
 }
 
@@ -395,6 +476,8 @@ function ExifStudioContent({
   formattedDate,
   copiedSha,
   onCopySha,
+  onToggleArchive,
+  onToggleLock,
   onClose,
 }: ExifStudioContentProps) {
   return (
@@ -408,6 +491,26 @@ function ExifStudioContent({
           className="w-8 h-8 rounded-full flex items-center justify-center text-zinc-400 hover:bg-white/10 hover:text-white"
         >
           <X className="w-4 h-4" />
+        </button>
+      </div>
+
+      {/* Mobile Quick Actions (Archive / Lock) */}
+      <div className="grid grid-cols-2 gap-2 sm:hidden">
+        <button
+          type="button"
+          onClick={onToggleArchive}
+          className="flex items-center justify-center gap-1.5 rounded-xl border border-white/15 bg-white/5 py-2.5 text-xs font-medium text-white"
+        >
+          <Archive className="w-3.5 h-3.5" />
+          {item.isArchived ? 'Unarchive' : 'Archive'}
+        </button>
+        <button
+          type="button"
+          onClick={onToggleLock}
+          className="flex items-center justify-center gap-1.5 rounded-xl border border-white/15 bg-white/5 py-2.5 text-xs font-medium text-white"
+        >
+          {item.isLocked ? <Unlock className="w-3.5 h-3.5" /> : <Lock className="w-3.5 h-3.5" />}
+          {item.isLocked ? 'Unlock' : 'Lock Folder'}
         </button>
       </div>
 
