@@ -22,6 +22,8 @@ import {
   LogOut,
   Monitor,
   Moon,
+  Pause,
+  Play,
   QrCode,
   RefreshCw,
   Settings2,
@@ -33,7 +35,13 @@ import {
   Upload,
   X,
 } from 'lucide-react';
-import type { AlbumItem, TelegramSessionPayload, ThemeMode, TransferJob } from '@/lib/types';
+import type {
+  AlbumItem,
+  TelegramSessionPayload,
+  ThemeMode,
+  TransferJob,
+  UploadChunkSize,
+} from '@/lib/types';
 import {
   buildEmergencyRecoveryKit,
   downloadTextFile,
@@ -64,7 +72,10 @@ interface UploadModalProps {
   channelTitle?: string;
   onClose: () => void;
   onRequireAuth: () => void;
-  onUploadFiles: (files: File[], options: { album?: string; isLocked?: boolean }) => Promise<void>;
+  onUploadFiles: (
+    files: File[],
+    options: { album?: string; isLocked?: boolean; chunkSizeKb?: UploadChunkSize }
+  ) => Promise<void>;
 }
 
 export function UploadModal({
@@ -85,6 +96,22 @@ export function UploadModal({
   const [dragOver, setDragOver] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [chunkSizeKb, setChunkSizeKb] = useState<UploadChunkSize>(() => {
+    if (typeof window !== 'undefined') {
+      const saved = window.localStorage.getItem('framely_upload_chunk_size');
+      if (saved === '128' || saved === '256' || saved === '512' || saved === '1024') {
+        return Number(saved) as UploadChunkSize;
+      }
+    }
+    return 512;
+  });
+
+  const handleChunkSizeChange = (val: UploadChunkSize) => {
+    setChunkSizeKb(val);
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem('framely_upload_chunk_size', String(val));
+    }
+  };
 
   if (!open) return null;
 
@@ -110,6 +137,7 @@ export function UploadModal({
       await onUploadFiles(selectedFiles, {
         album: selectedAlbum || undefined,
         isLocked,
+        chunkSizeKb,
       });
       setSelectedFiles([]);
       setSelectedAlbum('');
@@ -262,6 +290,42 @@ export function UploadModal({
                 </span>
               </label>
             </div>
+          </div>
+
+          {/* MTProto Chunk Size & Speed Selector */}
+          <div className="space-y-1.5 pt-1">
+            <div className="flex items-center justify-between">
+              <label className="block text-xs font-semibold text-slate-700 dark:text-zinc-300">
+                MTProto Stream Chunk Size & Speed
+              </label>
+              <span className="text-[11px] font-mono text-slate-500 dark:text-zinc-400">
+                {chunkSizeKb === 1024
+                  ? '1 MB Turbo Throughput'
+                  : `${chunkSizeKb} KB / MTProto chunk`}
+              </span>
+            </div>
+            <div className="grid grid-cols-4 gap-1.5 p-1 rounded-xl bg-[#F8FAFD] dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800">
+              {([128, 256, 512, 1024] as UploadChunkSize[]).map((sz) => (
+                <button
+                  key={sz}
+                  type="button"
+                  onClick={() => handleChunkSizeChange(sz)}
+                  className={`py-1.5 text-xs font-semibold rounded-lg transition-colors ${
+                    chunkSizeKb === sz
+                      ? 'bg-[#0B57D0] text-white shadow-xs'
+                      : 'text-slate-600 dark:text-zinc-400 hover:bg-slate-200/60 dark:hover:bg-zinc-800'
+                  }`}
+                >
+                  {sz === 1024 ? '1 MB ⚡' : `${sz} KB`}
+                </button>
+              ))}
+            </div>
+            <p className="text-[11px] text-[#5F6368] dark:text-zinc-400">
+              {chunkSizeKb === 128 && 'Best for low bandwidth or cellular connections.'}
+              {chunkSizeKb === 256 && 'Balanced streaming for standard home WiFi.'}
+              {chunkSizeKb === 512 && 'Fast Telegram maximum single MTProto chunk size (recommended).'}
+              {chunkSizeKb === 1024 && 'Turbo 1 MB throughput using 4 concurrent parallel chunk workers.'}
+            </p>
           </div>
 
           {error && (
@@ -1358,21 +1422,56 @@ export function TransfersModal({
         <div className="p-5 overflow-y-auto space-y-3">
           {jobs.length === 0 ? (
             <p className="text-xs text-[#5F6368] dark:text-zinc-400 text-center py-6">
-              No active uploads or ZIP exports yet. Every file transfers in 128 KB chunks directly over Telegram MTProto WebSockets.
+              No active uploads or ZIP exports yet. Files transfer directly over Telegram MTProto WebSockets with pause & resume support.
             </p>
           ) : (
             jobs.map((job) => (
               <div
                 key={job.id}
-                className="rounded-xl border border-slate-200 dark:border-zinc-800 p-3 space-y-1.5"
+                className="rounded-xl border border-slate-200 dark:border-zinc-800 p-3 space-y-2 bg-[#F8FAFD]/50 dark:bg-zinc-900/40"
               >
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-xs font-semibold text-[#1F1F1F] dark:text-zinc-100 truncate">
                     {job.filename}
                   </span>
-                  <span className="text-[11px] font-mono tabular-nums text-slate-500 dark:text-zinc-400 shrink-0">
-                    {job.progress}%
-                  </span>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <span className="text-[11px] font-mono tabular-nums text-slate-500 dark:text-zinc-400">
+                      {job.progress}%
+                    </span>
+                    {job.status === 'streaming' && job.onPause && (
+                      <button
+                        type="button"
+                        onClick={job.onPause}
+                        aria-label={`Pause ${job.filename}`}
+                        title="Pause Upload"
+                        className="p-1 rounded-md text-amber-600 hover:text-amber-700 hover:bg-amber-50 dark:hover:bg-amber-950/40 transition-colors"
+                      >
+                        <Pause className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                    {job.status === 'paused' && job.onResume && (
+                      <button
+                        type="button"
+                        onClick={job.onResume}
+                        aria-label={`Resume ${job.filename}`}
+                        title="Resume Upload"
+                        className="p-1 rounded-md text-[#0B57D0] hover:text-[#0842A0] dark:text-[#A8C7FA] hover:bg-slate-100 dark:hover:bg-zinc-800 transition-colors"
+                      >
+                        <Play className="w-3.5 h-3.5 fill-current" />
+                      </button>
+                    )}
+                    {(job.status === 'streaming' || job.status === 'paused') && job.onCancel && (
+                      <button
+                        type="button"
+                        onClick={job.onCancel}
+                        aria-label={`Cancel ${job.filename}`}
+                        title="Cancel Upload"
+                        className="p-1 rounded-md text-red-500 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-950/40 transition-colors"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
                 </div>
                 <div className="h-1.5 w-full rounded-full bg-slate-100 dark:bg-zinc-800 overflow-hidden">
                   <div
@@ -1381,13 +1480,22 @@ export function TransfersModal({
                         ? 'bg-red-500'
                         : job.status === 'completed'
                           ? 'bg-emerald-500'
-                          : 'bg-[#0B57D0]'
+                          : job.status === 'paused'
+                            ? 'bg-amber-500'
+                            : 'bg-[#0B57D0]'
                     }`}
                     style={{ width: `${job.progress}%` }}
                   />
                 </div>
                 <div className="flex items-center justify-between text-[11px] text-[#5F6368] dark:text-zinc-400">
-                  <span>{job.detail || job.status}</span>
+                  <span className="flex items-center gap-1.5">
+                    {job.status === 'paused' && (
+                      <span className="inline-block px-1.5 py-0.2 rounded bg-amber-100 dark:bg-amber-950/50 text-amber-700 dark:text-amber-300 font-semibold text-[10px]">
+                        PAUSED
+                      </span>
+                    )}
+                    {job.detail || job.status}
+                  </span>
                   <span className="font-mono tabular-nums">{formatBytes(job.sizeBytes)}</span>
                 </div>
               </div>

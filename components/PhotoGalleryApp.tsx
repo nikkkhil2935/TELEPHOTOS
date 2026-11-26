@@ -38,7 +38,7 @@ import {
 } from 'lucide-react';
 import { db } from '@/lib/db';
 import { startSingleTabGuard, type SingleTabGuardHandle } from '@/lib/services/singleTabGuard';
-import { tgClient } from '@/lib/services/tgClient';
+import { createUploadControlSignal, tgClient } from '@/lib/services/tgClient';
 import { getAutoLockMinutes, loadEncryptedVaultEnvelope } from '@/lib/services/vaultService';
 import type {
   AlbumItem,
@@ -49,6 +49,7 @@ import type {
   TelegramSessionPayload,
   ThemeMode,
   TransferJob,
+  UploadChunkSize,
 } from '@/lib/types';
 import {
   formatBytes,
@@ -357,7 +358,7 @@ export function PhotoGalleryApp({
     return Math.min(100, Math.max(2.5, rawPct));
   }, [totalUsedBytes]);
 
-  // Search filter
+  // Search filter supporting filenames, camera, place, albums, and Gemini AI tags & descriptions
   const searchResults = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     if (!q) return null;
@@ -368,7 +369,9 @@ export function PhotoGalleryApp({
         (m.camera && m.camera.toLowerCase().includes(q)) ||
         (m.lens && m.lens.toLowerCase().includes(q)) ||
         m.albums.some((a) => a.toLowerCase().includes(q)) ||
-        m.takenAt.toLowerCase().includes(q)
+        m.takenAt.toLowerCase().includes(q) ||
+        (m.tags && m.tags.some((t) => t.toLowerCase().includes(q))) ||
+        (m.aiDescription && m.aiDescription.toLowerCase().includes(q))
       );
     });
   }, [activeMedia, searchQuery]);
@@ -376,26 +379,34 @@ export function PhotoGalleryApp({
   const searchSuggestions = useMemo(() => {
     const places = Array.from(new Set(activeMedia.map((m) => m.placeName).filter(Boolean))) as string[];
     const cameras = Array.from(new Set(activeMedia.map((m) => m.camera).filter(Boolean))) as string[];
+    const aiTags = Array.from(
+      new Set(activeMedia.flatMap((m) => m.tags || []).filter(Boolean))
+    ) as string[];
+
     return [
-      ...places.slice(0, 3).map((p) => ({ label: p, kind: 'Place' })),
+      ...aiTags.slice(0, 3).map((t) => ({ label: `#${t}`, kind: 'AI Tag' })),
+      ...places.slice(0, 2).map((p) => ({ label: p, kind: 'Place' })),
       ...cameras.slice(0, 2).map((c) => ({ label: c, kind: 'Camera' })),
     ];
   }, [activeMedia]);
 
   // Actions
-  const handleSyncTelegram = async () => {
+  const handleSyncTelegram = async (fetchAll = true) => {
     if (!session) {
       setAuthModalOpen(true);
       return;
     }
     setSyncing(true);
     try {
-      const res = await tgClient.syncRecentChannelMessages(60);
+      const res = await tgClient.syncRecentChannelMessages({
+        fetchAll,
+        limit: 10000,
+      });
       setLiveConnected(true);
       showToast(
         res.syncedCount > 0
           ? `Synced ${res.syncedCount} ${res.syncedCount === 1 ? 'item' : 'items'} from ${session.channelTitle}.`
-          : `${session.channelTitle} is up to date.`
+          : `${session.channelTitle} is fully up to date.`
       );
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Telegram sync failed.');
@@ -406,10 +417,33 @@ export function PhotoGalleryApp({
 
   const handleUploadFiles = async (
     files: File[],
-    options: { album?: string; isLocked?: boolean }
+    options: { album?: string; isLocked?: boolean; chunkSizeKb?: UploadChunkSize }
   ) => {
     for (const file of files) {
       const jobId = `up_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+      const signal = createUploadControlSignal();
+
+      const handleJobPause = () => {
+        signal.pause();
+        setTransferJobs((prev) =>
+          prev.map((j) => (j.id === jobId ? { ...j, status: 'paused', detail: 'Paused by user' } : j))
+        );
+      };
+
+      const handleJobResume = () => {
+        signal.resume();
+        setTransferJobs((prev) =>
+          prev.map((j) => (j.id === jobId ? { ...j, status: 'streaming', detail: 'Resuming streaming...' } : j))
+        );
+      };
+
+      const handleJobCancel = () => {
+        signal.cancel();
+        setTransferJobs((prev) =>
+          prev.map((j) => (j.id === jobId ? { ...j, status: 'error', detail: 'Cancelled' } : j))
+        );
+      };
+
       setTransferJobs((prev) => [
         {
           id: jobId,
@@ -420,6 +454,10 @@ export function PhotoGalleryApp({
           status: 'queued',
           detail: 'Reading EXIF headers',
           startedAt: new Date().toISOString(),
+          chunkSizeKb: options.chunkSizeKb,
+          onPause: handleJobPause,
+          onResume: handleJobResume,
+          onCancel: handleJobCancel,
         },
         ...prev,
       ]);
@@ -428,6 +466,8 @@ export function PhotoGalleryApp({
         await tgClient.uploadMediaItem(file, {
           albums: options.album ? [options.album] : [],
           isLocked: options.isLocked,
+          chunkSizeKb: options.chunkSizeKb,
+          signal,
           onProgress: (pct, stage) => {
             setTransferJobs((prev) =>
               prev.map((j) =>
@@ -435,7 +475,7 @@ export function PhotoGalleryApp({
                   ? {
                       ...j,
                       progress: pct,
-                      status: pct >= 100 ? 'completed' : 'streaming',
+                      status: pct >= 100 ? 'completed' : j.status === 'paused' ? 'paused' : 'streaming',
                       detail: stage,
                     }
                   : j
@@ -444,6 +484,9 @@ export function PhotoGalleryApp({
           },
         });
       } catch (err) {
+        if (signal.isCancelled) {
+          return;
+        }
         setTransferJobs((prev) =>
           prev.map((j) =>
             j.id === jobId
@@ -1604,7 +1647,7 @@ export function PhotoGalleryApp({
 
           <button
             type="button"
-            onClick={handleSyncTelegram}
+            onClick={() => handleSyncTelegram(true)}
             disabled={syncing}
             aria-label="Sync Telegram Channel"
             title={session ? `Sync ${session.channelTitle}` : 'Connect Telegram to Sync'}

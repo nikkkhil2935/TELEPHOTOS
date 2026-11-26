@@ -14,6 +14,12 @@ export class FramelyDatabase extends Dexie {
       albums: '++id, name, coverMediaId, createdAt, libraryId',
       personGroups: 'id, name, faceUrl, count, libraryId',
     });
+    this.version(2).stores({
+      media:
+        'messageId, libraryId, kind, takenAt, placeName, isFavorite, isArchived, trashedAt, *albums, *tags',
+      albums: '++id, name, coverMediaId, createdAt, libraryId',
+      personGroups: 'id, name, faceUrl, count, libraryId',
+    });
   }
 }
 

@@ -278,6 +278,101 @@ export function TimelineView({
     lastClickedIndexRef.current = null;
   };
 
+  // Drag-to-select rectangle state & interaction
+  const timelineContainerRef = useRef<HTMLDivElement | null>(null);
+  const [dragBox, setDragBox] = useState<{
+    startX: number;
+    startY: number;
+    currentX: number;
+    currentY: number;
+    isDragging: boolean;
+  } | null>(null);
+  const dragInitialSelectedRef = useRef<Set<number>>(new Set());
+  const isDraggingActiveRef = useRef(false);
+
+  const handleContainerMouseDown = useCallback(
+    (e: React.MouseEvent<HTMLDivElement>) => {
+      if (e.button !== 0) return;
+      const target = e.target as HTMLElement | null;
+      if (
+        target?.closest(
+          'button, input, select, textarea, a, video, [role="button"], [role="tab"], [role="dialog"], [role="region"]'
+        )
+      ) {
+        return;
+      }
+
+      dragInitialSelectedRef.current = e.shiftKey ? new Set(selectedIds) : new Set();
+      setDragBox({
+        startX: e.clientX,
+        startY: e.clientY,
+        currentX: e.clientX,
+        currentY: e.clientY,
+        isDragging: false,
+      });
+    },
+    [selectedIds]
+  );
+
+  useEffect(() => {
+    if (!dragBox) return;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      const dist = Math.hypot(e.clientX - dragBox.startX, e.clientY - dragBox.startY);
+      const isDragging = dragBox.isDragging || dist > 6;
+      isDraggingActiveRef.current = isDragging;
+
+      setDragBox((prev) =>
+        prev ? { ...prev, currentX: e.clientX, currentY: e.clientY, isDragging } : null
+      );
+
+      if (isDragging && timelineContainerRef.current) {
+        const boxLeft = Math.min(dragBox.startX, e.clientX);
+        const boxTop = Math.min(dragBox.startY, e.clientY);
+        const boxRight = Math.max(dragBox.startX, e.clientX);
+        const boxBottom = Math.max(dragBox.startY, e.clientY);
+
+        const cardElements = timelineContainerRef.current.querySelectorAll<HTMLElement>(
+          '[data-media-card="true"]'
+        );
+        const nextSelected = new Set(dragInitialSelectedRef.current);
+
+        cardElements.forEach((el) => {
+          const rect = el.getBoundingClientRect();
+          const intersects = !(
+            rect.right < boxLeft ||
+            rect.left > boxRight ||
+            rect.bottom < boxTop ||
+            rect.top > boxBottom
+          );
+          const rawId = el.getAttribute('data-media-id');
+          if (rawId) {
+            const id = Number(rawId);
+            if (intersects) {
+              nextSelected.add(id);
+            }
+          }
+        });
+
+        setSelectedIds(nextSelected);
+      }
+    };
+
+    const handleMouseUp = () => {
+      setTimeout(() => {
+        isDraggingActiveRef.current = false;
+      }, 50);
+      setDragBox(null);
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [dragBox, setSelectedIds]);
+
   const selectedArray = Array.from(selectedIds);
 
   const formattedReferenceDay = useMemo(
@@ -291,7 +386,26 @@ export function TimelineView({
   );
 
   return (
-    <div className="relative px-4 sm:px-7 py-5 max-w-[1600px] mx-auto pb-24 lg:pb-12">
+    <div
+      ref={timelineContainerRef}
+      onMouseDown={handleContainerMouseDown}
+      className={`relative px-4 sm:px-7 py-5 max-w-[1600px] mx-auto pb-24 lg:pb-12 ${
+        dragBox?.isDragging ? 'select-none' : ''
+      }`}
+    >
+      {/* Drag-to-select visual marquee rectangle */}
+      {dragBox && dragBox.isDragging && (
+        <div
+          role="presentation"
+          className="fixed pointer-events-none z-50 rounded-lg border-2 border-[#0B57D0] bg-[#0B57D0]/20 shadow-xs backdrop-blur-[0.5px]"
+          style={{
+            left: Math.min(dragBox.startX, dragBox.currentX),
+            top: Math.min(dragBox.startY, dragBox.currentY),
+            width: Math.abs(dragBox.currentX - dragBox.startX),
+            height: Math.abs(dragBox.currentY - dragBox.startY),
+          }}
+        />
+      )}
       {/* Floating Blue Selection Action Bar */}
       {selectedArray.length > 0 && (
         <div
@@ -657,6 +771,8 @@ export function TimelineView({
                       return (
                         <div
                           key={item.messageId}
+                          data-media-card="true"
+                          data-media-id={item.messageId}
                           className={`group relative aspect-square overflow-hidden rounded-xl bg-slate-100 dark:bg-zinc-900 transition-all ${
                             isSelected
                               ? 'ring-3 ring-[#0B57D0] dark:ring-[#A8C7FA] scale-[0.96]'
@@ -666,6 +782,7 @@ export function TimelineView({
                           <button
                             type="button"
                             onClick={(e) => {
+                              if (isDraggingActiveRef.current) return;
                               if (selectedIds.size > 0 || e.shiftKey) {
                                 toggleSelectItem(item.messageId, flatIdx, e.shiftKey);
                               } else {

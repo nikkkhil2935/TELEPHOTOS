@@ -17,6 +17,7 @@ import {
   Maximize2,
   Minimize2,
   ShieldCheck,
+  Sparkles,
   Trash2,
   Unlock,
   X,
@@ -66,8 +67,20 @@ export function MediaViewer({
   const [copiedSha, setCopiedSha] = useState(false);
   const [hydratedUrls, setHydratedUrls] = useState<Record<number, string>>({});
   const [loadingMasterPct, setLoadingMasterPct] = useState<number | null>(null);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [controlsVisible, setControlsVisible] = useState(true);
   const activeThumbRef = useRef<HTMLButtonElement | null>(null);
   const touchStartXRef = useRef<number | null>(null);
+  const touchStartYRef = useRef<number | null>(null);
+  const lastTapRef = useRef<number>(0);
+
+  const toggleFullscreen = () => {
+    if (!document.fullscreenElement) {
+      document.documentElement.requestFullscreen?.().then(() => setIsFullscreen(true)).catch(() => {});
+    } else {
+      document.exitFullscreen?.().then(() => setIsFullscreen(false)).catch(() => {});
+    }
+  };
 
   const currentId = current?.messageId ?? null;
   const currentFullUrl = current?.fullUrl;
@@ -199,7 +212,11 @@ export function MediaViewer({
       className="fixed inset-0 z-50 flex flex-col bg-black/[0.96] text-white select-none"
     >
       {/* Top Cinema Control Bar */}
-      <header className="h-14 shrink-0 px-3 sm:px-5 flex items-center justify-between gap-3 border-b border-white/10 bg-black/50 backdrop-blur-md">
+      <header
+        className={`h-14 shrink-0 px-3 sm:px-5 flex items-center justify-between gap-3 border-b border-white/10 bg-black/60 backdrop-blur-md transition-all duration-200 z-30 ${
+          controlsVisible ? 'translate-y-0 opacity-100' : '-translate-y-full opacity-0 pointer-events-none'
+        }`}
+      >
         <div className="flex items-center gap-2 min-w-0">
           <button
             type="button"
@@ -218,6 +235,15 @@ export function MediaViewer({
         </div>
 
         <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
+          <button
+            type="button"
+            onClick={toggleFullscreen}
+            aria-label={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+            title="Toggle Fullscreen"
+            className="w-9 h-9 rounded-full flex items-center justify-center text-white/80 hover:bg-white/10 transition-colors"
+          >
+            {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
+          </button>
           {current.kind !== 'video' && (
             <button
               type="button"
@@ -295,22 +321,53 @@ export function MediaViewer({
 
       {/* Main Darkroom Stage + Responsive EXIF Studio */}
       <div className="flex-1 min-h-0 flex relative overflow-hidden">
-        {/* Cinema Viewport with Touch Swipe Navigation */}
+        {/* Cinema Viewport with Touch Swipe Navigation, Double-tap Zoom, & Vertical Swipe-Down Close */}
         <div
           className="flex-1 min-w-0 flex flex-col relative"
           onTouchStart={(e) => {
-            touchStartXRef.current = e.touches[0]?.clientX ?? null;
+            if (e.touches.length === 1) {
+              const now = Date.now();
+              if (now - lastTapRef.current < 280) {
+                // Double tap on mobile zooms in/out
+                e.preventDefault();
+                setZoomed((z) => !z);
+              }
+              lastTapRef.current = now;
+              touchStartXRef.current = e.touches[0]?.clientX ?? null;
+              touchStartYRef.current = e.touches[0]?.clientY ?? null;
+            }
           }}
           onTouchEnd={(e) => {
-            if (touchStartXRef.current === null || zoomed) return;
+            if (touchStartXRef.current === null || touchStartYRef.current === null || zoomed) return;
             const endX = e.changedTouches[0]?.clientX ?? touchStartXRef.current;
-            const delta = endX - touchStartXRef.current;
+            const endY = e.changedTouches[0]?.clientY ?? touchStartYRef.current;
+            const deltaX = endX - touchStartXRef.current;
+            const deltaY = endY - touchStartYRef.current;
             touchStartXRef.current = null;
-            if (delta > 60) goPrev();
-            else if (delta < -60) goNext();
+            touchStartYRef.current = null;
+
+            // Vertical swipe down to close lightbox
+            if (deltaY > 90 && Math.abs(deltaY) > Math.abs(deltaX) * 1.3) {
+              onClose();
+              return;
+            }
+
+            // Horizontal swipe for next/previous
+            if (deltaX > 50 && Math.abs(deltaX) > Math.abs(deltaY)) {
+              goPrev();
+            } else if (deltaX < -50 && Math.abs(deltaX) > Math.abs(deltaY)) {
+              goNext();
+            }
           }}
         >
-          <div className="flex-1 min-h-0 relative flex items-center justify-center p-3 sm:p-8 overflow-hidden">
+          <div
+            onClick={() => {
+              if (window.innerWidth < 1024) {
+                setControlsVisible((v) => !v);
+              }
+            }}
+            className="flex-1 min-h-0 relative flex items-center justify-center p-3 sm:p-8 overflow-hidden cursor-pointer"
+          >
             {activeIndex > 0 && (
               <button
                 type="button"
@@ -375,7 +432,9 @@ export function MediaViewer({
           {/* 0ms Windowed Camera Roll Filmstrip (active ± 18) */}
           <div
             aria-label="Camera roll filmstrip"
-            className="h-20 shrink-0 border-t border-white/10 bg-black/75 px-4 flex items-center justify-center"
+            className={`h-20 shrink-0 border-t border-white/10 bg-black/75 px-4 flex items-center justify-center transition-all duration-200 ${
+              controlsVisible ? 'translate-y-0 opacity-100' : 'translate-y-full opacity-0 pointer-events-none'
+            }`}
           >
             <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar max-w-full py-2">
               {windowedFilmstrip.map((thumb) => {
@@ -541,6 +600,35 @@ function ExifStudioContent({
           <p className="text-xs text-zinc-100 mt-0.5">{formattedDate}</p>
         </div>
       </div>
+
+      {/* Gemini AI Semantic Tags & Visual Intelligence */}
+      {((item.tags && item.tags.length > 0) || item.aiDescription) && (
+        <div className="pt-4 border-t border-white/10 space-y-3">
+          <div className="flex items-center gap-2 text-xs font-semibold text-zinc-300">
+            <Sparkles className="w-4 h-4 text-[#A8C7FA]" />
+            <span>Gemini AI Auto-Tags & Scene Analysis</span>
+          </div>
+
+          {item.aiDescription && (
+            <p className="text-xs text-zinc-200 leading-relaxed bg-white/[0.04] border border-white/10 p-3 rounded-xl italic">
+              &ldquo;{item.aiDescription}&rdquo;
+            </p>
+          )}
+
+          {item.tags && item.tags.length > 0 && (
+            <div className="flex flex-wrap gap-1.5 pt-0.5">
+              {item.tags.map((tag) => (
+                <span
+                  key={tag}
+                  className="inline-flex items-center px-2.5 py-1 rounded-full text-[11px] font-medium bg-[#0B57D0]/25 border border-[#0B57D0]/40 text-[#A8C7FA]"
+                >
+                  #{tag}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Camera & Optics */}
       <div className="pt-4 border-t border-white/10 space-y-3">

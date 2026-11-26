@@ -60,6 +60,8 @@ export interface MediaItem {
   uploadedAt: string;
   albums: string[];
   personIds?: string[];
+  tags?: string[];
+  aiDescription?: string;
   mtprotoDc?: string;
 }
 
@@ -93,7 +95,11 @@ export interface StructuredCaptionV1 {
   lon?: number;
   fav: 0 | 1;
   albums: string[];
+  tags?: string[];
+  desc?: string;
 }
+
+export type UploadChunkSize = 128 | 256 | 512 | 1024; // KB
 
 export interface EncryptedVaultEnvelope {
   v: 1;
@@ -128,9 +134,13 @@ export interface TransferJob {
   direction: 'upload' | 'download';
   sizeBytes: number;
   progress: number; // 0-100
-  status: 'queued' | 'encrypting' | 'streaming' | 'completed' | 'error';
+  status: 'queued' | 'encrypting' | 'streaming' | 'paused' | 'completed' | 'error';
   detail?: string;
   startedAt: string;
+  chunkSizeKb?: UploadChunkSize;
+  onPause?: () => void;
+  onResume?: () => void;
+  onCancel?: () => void;
 }
 
 export interface PlaceCluster {

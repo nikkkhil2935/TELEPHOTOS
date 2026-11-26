@@ -70,6 +70,8 @@ export function encodeStructuredCaption(item: MediaItem): string {
     ...(typeof item.longitude === 'number' ? { lon: Number(item.longitude.toFixed(5)) } : {}),
     fav: item.isFavorite ? 1 : 0,
     albums: item.albums.map((a) => sanitizeCaptionText(a)).filter(Boolean),
+    ...(item.tags?.length ? { tags: item.tags.slice(0, 10).map((t) => sanitizeCaptionText(t)).filter(Boolean) } : {}),
+    ...(item.aiDescription ? { desc: sanitizeCaptionText(item.aiDescription).slice(0, 200) } : {}),
   };
   return JSON.stringify(payload);
 }
@@ -97,6 +99,10 @@ export function decodeStructuredCaption(rawCaption: string): StructuredCaptionV1
       albums: Array.isArray(parsed.albums)
         ? parsed.albums.map((a: unknown) => sanitizeCaptionText(String(a))).filter(Boolean)
         : [],
+      tags: Array.isArray(parsed.tags)
+        ? parsed.tags.map((t: unknown) => sanitizeCaptionText(String(t))).filter(Boolean)
+        : [],
+      desc: typeof parsed.desc === 'string' ? sanitizeCaptionText(parsed.desc) : undefined,
     };
   } catch {
     return null;
